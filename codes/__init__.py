@@ -34,7 +34,6 @@ CODES = {code.name: code for code in [
     Code("none", list, list),
     _repetition_code(3),
     _repetition_code(5),
-    _repetition_code(7),
     Code("hamming74", encode_hamming, decode_hamming),
     Code("conv75", conv_encode, decode_viterbi),
 ]}

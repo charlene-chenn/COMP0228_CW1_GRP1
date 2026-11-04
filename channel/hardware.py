@@ -31,12 +31,14 @@ class ArduinoLink:
         self.ser = serial.Serial(port, baudrate, timeout=timeout)
         self._wait_until_ready()
 
-    def send_and_receive(self, bits) -> Tuple[List[int], List[int]]:
+    def send_and_receive(self, bits, on_bit=None) -> Tuple[List[int], List[int]]:
         """
         Transmit bits through the motor and return what the piezo detected.
 
         Args:
             bits (List[int]): bits to send, as ints 0 or 1.
+            on_bit (Callable, optional): called as on_bit(index, detected, vibration)
+                as each bit's reply arrives, for live viewing. Defaults to None.
 
         Returns:
             Tuple[List[int], List[int]]: the detected bit and the raw
@@ -51,7 +53,7 @@ class ArduinoLink:
         if not text:
             return [], []
 
-        rows = [line.split(",") for line in self._command("B" + text)]
+        rows = [line.split(",") for line in self._command("B" + text, on_bit)]
 
         # A missing reply would shift every later bit, so never let it through
         if len(rows) != len(text):
@@ -96,7 +98,7 @@ class ArduinoLink:
         while self._read_line() != "READY":
             pass
 
-    def _command(self, command: str) -> List[str]:
+    def _command(self, command: str, on_bit=None) -> List[str]:
         """Send a command and return its reply lines, up to DONE."""
         self.ser.write((command + "\n").encode())
 
@@ -110,6 +112,9 @@ class ArduinoLink:
             # Calibration messages aren't data
             if not line.startswith(("Calibrating", "Keep", "Noise", "Threshold")):
                 replies.append(line)
+                if on_bit is not None:
+                    detected, vibration = line.split(",")
+                    on_bit(len(replies) - 1, int(detected), int(vibration))
 
     def _read_line(self) -> str:
         raw = self.ser.readline()
