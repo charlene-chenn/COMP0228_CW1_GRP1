@@ -1,5 +1,5 @@
 """
-Real channel: sends bits through the Arduino running piezo_reciever.ino over USB.
+Real channel: sends bits through the Arduino running piezo_receiver_v3.ino over USB.
 
 Test the link from the project folder (close the Arduino Serial Monitor first):
     python3 -m channel.hardware                  # lists the available ports
@@ -12,7 +12,7 @@ from typing import List, Tuple
 import serial
 from serial.tools import list_ports
 
-MAX_BITS = 1000    # Must match MAX_LINE in piezo_reciever.ino
+MAX_BITS = 1000    # Must match MAX_LINE in piezo_receiver_v3.ino
 BOOT_WAIT_S = 6.0  # Long enough for a board reset and its 3 s calibration
 
 
