@@ -1,5 +1,5 @@
 """
-Live viewer for the PRBS-9 strings. Start it with --live on experiments.run_case.
+Live viewer for the PRBS strings. Start it with --live on experiments.run_case.
 Closing the window stops the case at the end of the current string.
 
 Colour always means the bit that was sent: orange = sent 0, blue = sent 1.
@@ -20,6 +20,7 @@ from matplotlib.colors import BoundaryNorm, ListedColormap
 from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
 
+from experiments.sequences import prbs_name, row_label
 from experiments.summarise import wilson
 
 SURFACE = "#fcfcfb"
@@ -40,15 +41,31 @@ MAX_RUN_SHOWN = 8    # Longer error runs are counted in the last bar
 REFRESH_MS = 200
 
 
-def saved_events(rows: dict, repeats: int) -> list:
-    """Turn saved PRBS-9 strings back into viewer updates, so a resumed run shows them."""
+def map_layout(strings) -> list:
+    """
+    Work out the error maps to draw, one for each length of PRBS string.
+
+    Args:
+        strings: (block, index, length) for each PRBS string, in the order sent.
+
+    Returns:
+        list: (length, row labels) for each map.
+    """
+    maps = {}
+    for block, index, length in strings:
+        maps.setdefault(length, []).append(row_label(block, int(index)))
+    return list(maps.items())
+
+
+def saved_events(rows: dict) -> list:
+    """Turn saved PRBS strings back into viewer updates, so a resumed run shows them."""
     events = []
     for row in rows.values():
-        if row["block"] not in ("prbs", "reference"):
+        if row["block"] == "codes":
             continue
-        position = repeats if row["block"] == "reference" else int(row["index"])
+        label = row_label(row["block"], int(row["index"]))
         sent = [int(bit) for bit in row["sent"]]
-        events.append(("trial", position, sent, int(row["threshold"])))
+        events.append(("trial", label, sent, int(row["threshold"])))
         vibration = row["vibration"].split()
         for i, (bit, vib) in enumerate(zip(row["received"], vibration)):
             events.append(("bit", i, int(bit), int(vib)))
@@ -56,33 +73,36 @@ def saved_events(rows: dict, repeats: int) -> list:
 
 
 class LiveView:
-    def __init__(self, events: queue.Queue, case: str, labels: list, stop=None, save_path=None):
+    def __init__(self, events: queue.Queue, case: str, layout: list, stop=None, save_path=None):
         """
         Set up the window.
 
         Args:
             events (queue.Queue): updates from the running case.
             case (str): the case name for the title.
-            labels (list): one label per row of the error map.
+            layout (list): (length, row labels) for each error map, from map_layout.
             stop (threading.Event, optional): set when the window closes.
             save_path (Path, optional): where to save a picture when the case ends.
         """
         self.events = events
         self.case = case
-        self.labels = labels
+        self.maps = {
+            length: {"labels": labels, "raster": np.full((len(labels), length), NOT_SENT)}
+            for length, labels in layout
+        }
         self.stop = stop
         self.save_path = save_path
 
         self.status = "Waiting"
         self.finished = False
         self.row = 0
+        self.raster = None    # The map of the string being received
         self.sent = []
         self.threshold = 0
         self.position = 0
         self.total = 0
 
         self.strip = deque(maxlen=STRIP_BITS)
-        self.raster = np.full((len(labels), 511), NOT_SENT)
         self.errors = 0
         self.counts = {0: [0, 0], 1: [0, 0]}          # sent bit: [errors, bits]
         self.after = {}                               # (previous, sent): [errors, bits]
@@ -105,9 +125,12 @@ class LiveView:
         })
 
         self.fig = plt.figure(figsize=(13, 8.5), facecolor=SURFACE)
-        self.fig.canvas.manager.set_window_title("PRBS-9 live view")
+        self.fig.canvas.manager.set_window_title("PRBS live view")
+        # A map with few rows, like a single PRBS-9 string, doesn't need much height
+        map_heights = [0.3 + 0.1 * len(m["labels"]) for m in self.maps.values()]
         grid = self.fig.add_gridspec(
-            3, 3, height_ratios=[1.1, 1.3, 1.1], width_ratios=[0.8, 1, 1.2],
+            2 + len(map_heights), 3, height_ratios=[1.1, *map_heights, 1.1],
+            width_ratios=[0.8, 1, 1.2],
             left=0.06, right=0.98, top=0.88, bottom=0.08, hspace=0.62, wspace=0.26,
         )
 
@@ -115,19 +138,22 @@ class LiveView:
         self.subtitle = self.fig.text(0.06, 0.925, "", color=INK_SECONDARY)
 
         self.ax_strip = self.fig.add_subplot(grid[0, :])
-        self.ax_raster = self.fig.add_subplot(grid[1, :])
-        self.ax_stats = self.fig.add_subplot(grid[2, 0])
-        self.ax_after = self.fig.add_subplot(grid[2, 1])
-        self.ax_runs = self.fig.add_subplot(grid[2, 2])
+        for row, info in enumerate(self.maps.values(), 1):
+            info["ax"] = self.fig.add_subplot(grid[row, :])
+        self.ax_stats = self.fig.add_subplot(grid[-1, 0])
+        self.ax_after = self.fig.add_subplot(grid[-1, 1])
+        self.ax_runs = self.fig.add_subplot(grid[-1, 2])
 
-        for ax in (self.ax_strip, self.ax_raster, self.ax_after, self.ax_runs):
+        map_axes = [info["ax"] for info in self.maps.values()]
+        for ax in (self.ax_strip, *map_axes, self.ax_after, self.ax_runs):
             ax.set_facecolor(SURFACE)
             ax.spines["top"].set_visible(False)
             ax.spines["right"].set_visible(False)
             ax.tick_params(length=0)
 
         self._build_strip()
-        self._build_raster()
+        for number, (length, info) in enumerate(self.maps.items()):
+            self._build_raster(length, info, show_legend=number == 0)
         self.ax_stats.axis("off")
 
     def _build_strip(self) -> None:
@@ -156,17 +182,21 @@ class LiveView:
             loc="lower right", bbox_to_anchor=(1, 1), ncol=3, frameon=False, fontsize=9,
         )
 
-    def _build_raster(self) -> None:
-        ax = self.ax_raster
-        ax.set_title("Error map: where each repeat went wrong", loc="left", fontsize=11)
-        ax.set_xlabel("Position in PRBS-9 string (bit)")
-        ax.set_yticks(range(len(self.labels)), self.labels, fontsize=8)
+    def _build_raster(self, length: int, info: dict, show_legend: bool) -> None:
+        ax = info["ax"]
+        name = prbs_name(length)
+        ax.set_title(f"{name} error map: where each string went wrong", loc="left", fontsize=11)
+        ax.set_xlabel(f"Position in {name} string (bit)")
+        ax.set_yticks(range(len(info["labels"])), info["labels"], fontsize=8)
 
-        self.image = ax.imshow(
-            self.raster, aspect="auto", interpolation="nearest",
+        info["image"] = ax.imshow(
+            info["raster"], aspect="auto", interpolation="nearest",
             cmap=ListedColormap(RASTER_COLOURS),
             norm=BoundaryNorm([-0.5, 0.5, 1.5, 2.5, 3.5], 4),
         )
+
+        if not show_legend:
+            return
 
         ax.legend(
             handles=[
@@ -182,9 +212,12 @@ class LiveView:
 
         if kind == "trial":
             self._end_run()
-            _, self.row, self.sent, self.threshold = event
+            _, label, self.sent, self.threshold = event
+            info = self.maps[len(self.sent)]
+            self.raster = info["raster"]
+            self.row = info["labels"].index(label)
             self.position = 0
-            self.status = f"PRBS-9 {self.labels[self.row]} of {len(self.labels)}"
+            self.status = f"{prbs_name(len(self.sent))} {label} of {len(info['labels'])}"
 
         elif kind == "bit":
             _, index, bit, vibration = event
@@ -244,14 +277,15 @@ class LiveView:
 
     def _draw(self) -> None:
         detail = self.status
-        if self.sent and self.status.startswith("PRBS-9"):
+        if self.sent and self.status.startswith("PRBS"):
             detail += f", bit {self.position} of {len(self.sent)}"
         if self.threshold:
             detail += f"  |  threshold {self.threshold:,}"
         self.subtitle.set_text(detail)
 
         self._draw_strip()
-        self.image.set_data(self.raster)
+        for info in self.maps.values():
+            info["image"].set_data(info["raster"])
         self._draw_stats()
         self._draw_after()
         self._draw_runs()
@@ -366,16 +400,17 @@ def main():
     with open(path, newline="") as file:
         rows = {i: row for i, row in enumerate(csv.DictReader(file))}
 
-    repeats = sum(row["block"] == "prbs" for row in rows.values())
-    has_reference = any(row["block"] == "reference" for row in rows.values())
-    labels = [f"R{i + 1}" for i in range(repeats)] + (["ref"] if has_reference else [])
+    layout = map_layout(
+        (row["block"], row["index"], len(row["sent"]))
+        for row in rows.values() if row["block"] != "codes"
+    )
 
     events = queue.Queue()
-    for event in saved_events(rows, repeats):
+    for event in saved_events(rows):
         events.put(event)
     events.put(("done", "Saved run"))
 
-    view = LiveView(events, path.stem, labels, save_path=path.with_suffix(".png"))
+    view = LiveView(events, path.stem, layout, save_path=path.with_suffix(".png"))
     view.update()
     print("Saved", path.with_suffix(".png"))
     plt.show()

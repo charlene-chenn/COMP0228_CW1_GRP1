@@ -5,9 +5,9 @@ From the project folder (close the Arduino Serial Monitor first):
     python3 -m experiments.run_case PORT --material wood --distance 20 --settle 50 --window 50 --live
 
 A case runs these blocks, and saves each string to experiments/results/<case>.csv:
-    prbs       PRBS-9, repeated (uncoded), to characterise the noise
-    codes      random messages, each sent through every code in a shuffled order
-    reference  PRBS-9 once more, to compare with the start and check for drift
+    prbs5      PRBS-5, repeated (uncoded), to characterise the noise
+    codes      random 32-bit messages, each sent through every code in a shuffled order
+    reference  PRBS-5 once more, to compare with the start and check for drift
 
 Re-run the same command to carry on after a stop. Finished strings are skipped.
 Use --prbs-only for a quick look at a setting, and --sim to try this with no hardware.
@@ -27,7 +27,7 @@ from typing import Dict, List, Optional, Tuple
 
 from channel.sim_channel import SimulatedLink
 from codes import CODES
-from experiments.sequences import prbs9, random_message
+from experiments.sequences import prbs, random_message, row_label
 from experiments.summarise import print_summary
 
 RESULTS_DIR = Path(__file__).parent / "results"
@@ -59,28 +59,34 @@ def case_name(args, source: str) -> str:
     """Name the case after everything that was fixed for it."""
     name = (
         f"{args.material}_{args.distance:g}cm_{args.noise}"
-        f"_S{args.settle}_W{args.window}_run{args.run}"
+        f"_S{args.settle}_W{args.window}_M{args.message_bits}_run{args.run}"
     )
     name = re.sub(r"[^A-Za-z0-9_.-]+", "-", name)
     return f"sim_{name}" if source == "sim" else name
 
 
-def plan_trials(case: str, prbs_repeats: int, sets: int, prbs_only: bool) -> List[Trial]:
+def plan_trials(case: str, prbs_repeats: int, sets: int, message_bits: int,
+                prbs_only: bool, codes: List[str]) -> List[Trial]:
     """List the strings to send, in order. The same case always gets the same order."""
-    trials = [Trial("prbs", i, "none", "", prbs9()) for i in range(prbs_repeats)]
+    trials = [Trial("prbs5", i, "none", "", prbs(5)) for i in range(prbs_repeats)]
 
     if prbs_only:
         return trials
 
     for seed in range(sets):
         # Shuffled so that slow drift can't favour whichever code goes last
-        names = list(CODES)
+        names = list(codes)
         random.Random(f"{case}:{seed}").shuffle(names)
         for name in names:
-            trials.append(Trial("codes", seed, name, str(seed), random_message(seed)))
+            trials.append(Trial("codes", seed, name, str(seed), random_message(seed, message_bits)))
 
-    trials.append(Trial("reference", 0, "none", "", prbs9()))
+    trials.append(Trial("reference", 0, "none", "", prbs(5)))
     return trials
+
+
+def planned(args, case: str) -> List[Trial]:
+    return plan_trials(case, args.prbs_repeats, args.sets, args.message_bits,
+                       args.prbs_only, args.codes)
 
 
 def load_done(path: Path) -> Dict[Tuple[str, str, str], dict]:
@@ -155,7 +161,7 @@ def run_case(link, args, case: str, path: Path, fixed: dict,
     Returns:
         bool: True if the whole case has now been sent.
     """
-    trials = plan_trials(case, args.prbs_repeats, args.sets, args.prbs_only)
+    trials = planned(args, case)
     done = load_done(path)
     remaining = [t for t in trials if t.key not in done]
 
@@ -168,11 +174,13 @@ def run_case(link, args, case: str, path: Path, fixed: dict,
     link.set_window_ms(args.window)  # This also calibrates
     print("Threshold:", link.threshold)
 
-    is_new = not path.exists()
+    # A run stopped during its first string can leave an empty file behind
+    is_new = not path.exists() or path.stat().st_size == 0
     with open(path, "a", newline="") as file:
         writer = csv.DictWriter(file, fieldnames=FIELDS)
         if is_new:
             writer.writeheader()
+            file.flush()
 
         previous_block = None
         for number, trial in enumerate(remaining, 1):
@@ -180,7 +188,7 @@ def run_case(link, args, case: str, path: Path, fixed: dict,
                 return False
 
             # One threshold per block, so a block's strings are all judged alike
-            if previous_block == "prbs" and trial.block == "codes":
+            if previous_block not in (None, "codes") and trial.block == "codes":
                 time.sleep(RECALIBRATE_REST_S)
                 link.calibrate()
                 print("Threshold:", link.threshold)
@@ -188,8 +196,8 @@ def run_case(link, args, case: str, path: Path, fixed: dict,
 
             on_bit = None
             if events is not None and trial.block != "codes":
-                row = args.prbs_repeats if trial.block == "reference" else trial.index
-                events.put(("trial", row, trial.message, link.threshold))
+                label = row_label(trial.block, trial.index)
+                events.put(("trial", label, trial.message, link.threshold))
                 on_bit = lambda i, bit, vib: events.put(("bit", i, bit, vib))
             elif events is not None:
                 events.put(("status", f"Codes: set {trial.index + 1} of {args.sets}, {trial.code}"))
@@ -222,8 +230,11 @@ def parse_args():
     parser.add_argument("--window", type=int, default=100, help="measuring window in ms")
     parser.add_argument("--run", type=int, default=1, help="repeat number, e.g. after re-mounting")
     parser.add_argument("--notes", default="", help="anything else worth recording")
-    parser.add_argument("--prbs-repeats", type=int, default=10, help="uncoded PRBS-9 strings")
+    parser.add_argument("--prbs-repeats", type=int, default=10, help="uncoded PRBS-5 strings")
     parser.add_argument("--sets", type=int, default=20, help="messages sent through every code")
+    parser.add_argument("--message-bits", type=int, default=32, help="bits in each message")
+    parser.add_argument("--codes", nargs="+", choices=list(CODES), default=list(CODES),
+                        help="codes to run, all of them by default")
     parser.add_argument("--prbs-only", action="store_true", help="skip the codes and reference")
     parser.add_argument("--live", action="store_true", help="show the live viewer")
     parser.add_argument("--sim", action="store_true", help="use a simulated channel")
@@ -231,6 +242,8 @@ def parse_args():
     args = parser.parse_args()
     if not args.sim and not args.port:
         parser.error("give a serial port, or --sim")
+    if args.prbs_only and not args.prbs_repeats:
+        parser.error("--prbs-only needs at least one PRBS-5 string to send")
     return args
 
 
@@ -267,16 +280,17 @@ def main():
         return
 
     # The viewer has to stay on the main thread, so the case runs on another
-    from experiments.live_view import LiveView, saved_events
+    from experiments.live_view import LiveView, map_layout, saved_events
 
     events = queue.Queue()
     stop = threading.Event()
     outcome = {"finished": False, "error": None}
 
-    labels =[f"R{i + 1}" for i in range(args.prbs_repeats)]
-    labels += [] if args.prbs_only else ["ref"]
+    layout = map_layout(
+        (t.block, t.index, len(t.message)) for t in planned(args, case) if t.block != "codes"
+    )
 
-    for event in saved_events(load_done(path), args.prbs_repeats):
+    for event in saved_events(load_done(path)):
         events.put(event)
 
     def work():
@@ -290,7 +304,7 @@ def main():
             events.put(("done", f"Failed: {error}"))
 
     worker = threading.Thread(target=work, daemon=True)
-    view = LiveView(events, case, labels, stop, path.with_suffix(".png"))
+    view = LiveView(events, case, layout, stop, path.with_suffix(".png"))
     worker.start()
     view.show()
 

@@ -35,10 +35,10 @@ Keep the surface still during calibration.
 Set up a test case, then run it through every code. Each string is saved to `experiments/results/<case>.csv` as it finishes, and running the same command again carries on from where it stopped.
 
 ```
-# Quick look at a setting: one PRBS-9 string
-python3 -m experiments.run_case <port> --material wood --distance 20 --settle 50 --window 50 --prbs-only --prbs-repeats 1 --live
+# Quick look at a setting: 10 PRBS-5 strings
+python3 -m experiments.run_case <port> --material wood --distance 20 --settle 50 --window 50 --prbs-only --live
 
-# Full case: 10 PRBS-9 strings, 20 messages through every code, 1 PRBS-9 reference
+# Full case: 10 PRBS-5 strings, 20 32-bit messages through every code, 1 PRBS-5 reference
 python3 -m experiments.run_case <port> --material wood --distance 20 --noise fan --settle 50 --window 50 --live
 
 # Tables of the results so far
@@ -48,4 +48,4 @@ python3 -m experiments.summarise
 python3 -m experiments.live_view experiments/results/<case>.csv
 ```
 
-Add `--run 2` when repeating a case, for example after re-mounting the piezo. Closing the viewer stops the case after the current string. Use `--sim` in place of `<port>` to try all of this with no hardware; those results go in `experiments/results/sim/`, which git ignores.
+A full case at 50/50 takes about 14.6 minutes. Use `--codes none R3 R5` to run only some codes, or `--message-bits 64` for longer messages. Add `--run 2` when repeating a case, for example after re-mounting the piezo. Closing the viewer stops the case after the current string. Use `--sim` in place of `<port>` to try all of this with no hardware; those results go in `experiments/results/sim/`, which git ignores.
