@@ -10,14 +10,15 @@ There are 8 test cases with 3 runs each, so 24 runs in all. In each run, the sam
 | hamming74 (padded to 32) | 56 |
 | conv75 | 66 |
 
-That's 401 channel bits per run, which takes **about 45 seconds** including calibration. The `none` string is the uncoded baseline. Every coded string's raw channel bits are saved too, so each one also counts as a noise sample.
+That's 401 channel bits per run. At 150/50 each bit takes 204.8 ms, so a run takes **about 1.5 minutes** including calibration. The `none` string is the uncoded baseline. Every coded string's raw channel bits are saved too, so each one also counts as a noise sample.
 
-**Each run produces three things:**
-- `experiments/results/<case>.csv`: one row per string.
-- `experiments/results/<case>.png`: the viewer as it was at the end of the run, saved by `--live`.
-- `experiments/results/<case>_raw/`: one `.npz` per string, `codes_<set>_<code>.npz`, holding the raw piezo samples at 10 kHz for every bit, for the extensions.
+**Each run gets its own folder, `experiments/results/<case>/`, holding:**
+- `<case>.csv`: one row per string.
+- `<case>.png`: the viewer as it was at the end of the run, saved by `--live`.
+- `raw/`: one `.npz` per string, `codes_<set>_<code>.npz`, holding the raw piezo samples at 10 kHz for every bit, for the extensions.
+- `<case>.mp4`: a video of the raw signal scrolling through the whole run at real speed, made automatically when the run finishes. It is 1080p (1920 × 1080, 30 fps), takes about 3 minutes to make and is about 20 MB. `--no-video` skips it. Remake one with `python3 -m experiments.make_video experiments/results/<case>/<case>.csv`.
 
-The file lists below give the CSV name. The `.png` and the `_raw/` folder always sit next to it with the same name.
+The lists below give each run's folder.
 
 | Group | Case | Material | Geometry | Separation | Disturbance (`--noise`) |
 |---|---|---|---|---|---|
@@ -34,7 +35,7 @@ The wood 20 cm case is the control for both the material group and the disturban
 
 ## Fixed for every run
 
-- **Settle 50 ms, window 50 ms, whatever the pilot shows.** Each bit takes 102.4 ms, so about 9.8 bit/s before coding. This was decided before seeing any data from the new mount, and it stays the same for all 24 runs even if the baseline turns out error-free. If the speed were changed after looking at the baseline, cases run at different speeds couldn't be compared, and it would look like the speed was tuned to get a result. If the baseline is clean, the disturbance cases supply the physical noise. Material and distance are then compared by signal margin instead of error rate (see the notes at the end).
+- **Settle 150 ms, window 50 ms.** Each bit takes 204.8 ms, so about 4.9 bit/s before coding. This was chosen from the pilot and settle sweep (see below), before any suite data, and it stays the same for all 24 runs. Changing it partway would mean cases run at different speeds can't be compared.
 - **`--prbs-per-code --sets 1`:** one PRBS-5 through each code. `--sets N` would send it N times per code. If you raise it, keep it the same for every case.
 - **Motor and piezo positions on the specimen:** mark them so every re-mount puts them in the same place.
 - **Firmware:** the current `piezo_receiver_v3.ino`, which can stream raw samples. **Upload it again before the first session** (the version on the board can't). The git hash is saved in every row, so commit code changes before you start.
@@ -51,39 +52,76 @@ python3 -m channel.hardware $PORT      # quick check that the channel and raw st
 ```
 
 The check prints its 8 test bits twice, the second time with raw on. Look at its last lines:
-- `Raw:` should be 1024 samples per bit (at 50/50).
+- `Raw:` should be 2048 samples per bit. The check uses the sketch's default 100/100 timing. In the suite, at 150/50, it's 2048 too.
 - `Switch at:` is how many samples into each bit the motor switched. It's the time spent sending the previous bit's samples (10 samples = 1 ms). A few tens is fine.
 - `Late bits:` should be 0. If it isn't, the board can't send raw samples fast enough and bits are running long. Stop and tell the group before running anything.
 
 Close the Arduino Serial Monitor and Plotter first. Keep the surface still while it calibrates at the start of each run.
 
-## Pilot (once, before the suite)
+## Pilot and settle sweep (done 17 Nov 2026)
 
-The earlier trial runs were done before the current mount, and partly while damping was being added. They don't show how noisy the channel is now. This pilot checks the baseline on the setup as it will be used: wood 30 × 6, 20 cm, proper mount, no damping, no disturbance. It takes about 10 seconds.
+The earlier trial runs were done before the current mount, and partly while damping was being added, so they don't show how noisy the channel is now. The pilot checked the baseline on the setup as it will be used: wood 30 × 6, 20 cm, proper mount, no damping, no disturbance. It used PRBS-5 strings only (`--prbs-only`), window 50 ms, and varied the settle time.
+
+| Settle / window | Time per bit | Runs × bits | Errors | 0 after a 1 | 0 after a 0 | 1s |
+|---|---|---|---|---|---|---|
+| 50 / 50 | 102.4 ms | 4 × 93 | 45% in every run | all wrong (24/24 per run) | mostly wrong (18/21 per run) | all right |
+| 100 / 50 | 153.6 ms | 1 × 62 | 38.7% | all wrong (16/16) | 8/14 wrong | all right |
+| 150 / 50 | 204.8 ms | 1 × 62 | 25.8% | all wrong (16/16) | all right (0/14) | all right |
+
+What it shows:
+- **No bit errors were random.** At 150/50, every error is a 0 straight after a 1, and nothing else is ever wrong. The vibration from a 1 is still going when the next bit is measured. This is intersymbol interference, not random noise.
+- **The vibration takes about 220–250 ms to die away** after the motor switches off. This was measured from the 50/50 pilot's raw samples over the 4-bit run of 0s. The signal stays at the ADC maximum for about 60–100 ms, then has a tail of about 10,000–20,000 counts. It falls below the threshold (about 3,500) only after 220–250 ms. At 50/50 the window measures 50–100 ms after switch-off, while the signal is still at its maximum, which is why almost every 0 read as a 1.
+- **The 1s always clip** near the ADC maximum (about 62,000–64,000).
+- At 150/50 a 0 after a 1 reads at most about 31,000, against at least about 63,700 for a 1. So a threshold midway between them would separate them. The receiver's threshold sits just above the quiet noise floor instead.
+- `late_bits` was 0 in every run, so raw streaming didn't affect the timing.
+
+**Decision: settle 150 ms, window 50 ms.** The settings were chosen from the pilot and are fixed for the whole suite from here on.
+
+The pilot files (`experiments/results/pilot/`, `wood_20cm_none_S100_W50_M32_run0/`, `wood_20cm_none_S150_W50_M32_run0/`) should be moved out of `experiments/results/` before the suite starts, so the summaries only include the suite:
 
 ```
-python3 -m experiments.run_case $PORT --material wood --distance 20 --noise none --settle 50 --window 50 --prbs-only --prbs-repeats 3 --run 0 --notes "pilot, new mount, no damping" --live
+mkdir -p archive/pilot
+mv experiments/results/pilot/* experiments/results/wood_20cm_none_S100_W50_M32_run0 experiments/results/wood_20cm_none_S150_W50_M32_run0 archive/pilot/
 ```
 
-→ `experiments/results/wood_20cm_none_S50_W50_M32_run0.csv`
+(The 50/50 pilot files say `distance 450`. The setup was the 20 cm one.)
 
-Write down the error rate it prints, then move its files out of the suite's folder:
+### Channel check, 17 Nov 2026 (100/100, before the pilot)
+
+This was run with `python3 -m channel.hardware $PORT` straight after uploading the current sketch. That command doesn't set the timing, so it used the sketch's defaults: **settle 100 ms, window 100 ms** (2,048 samples, i.e. 204.8 ms per bit). Same wood 30 × 6 setup, proper mount, no damping, no disturbance.
 
 ```
-mv experiments/results/wood_20cm_none_S50_W50_M32_run0.csv experiments/results/wood_20cm_none_S50_W50_M32_run0.png experiments/results/wood_20cm_none_S50_W50_M32_run0_raw archive/trial_results/
+Threshold: 3451
+Sent:      [1, 0, 1, 0, 1, 1, 0, 0]
+Received:  [1, 1, 1, 1, 1, 1, 1, 0]
+Vibration: [64787, 26523, 64768, 25760, 64757, 64721, 24933, 2282]
+Wrong:     3
+Raw:        [2048, 2048, 2048, 2048, 2048, 2048, 2048, 2048] samples per bit
+Switch at:  [3, 45, 46, 48, 50, 52, 45, 45] samples into each bit
+Late bits:  0
+Vibration:  [64630, 25961, 64768, 26882, 64759, 64587, 23969, 2523] (with raw on)
 ```
 
-The pilot is only there to know what to expect. **It doesn't change the settings** (see the 50/50 rule above):
+What it shows:
+- **Raw streaming works.** No bits ran long. Sending a bit's samples took 4.5–5 ms (45–52 samples) at 2,048 samples per bit. At 50/50 (1,024 samples per bit) that should be about 2.5 ms. Turning raw on didn't change the readings beyond normal variation.
+- **All 3 errors were a 0 straight after a 1,** reading about 24,000–27,000 against a threshold of 3,451, even after a 100 ms settle. The only 0 that came after another 0 read correctly (2,282). Vibration from a 1 is still strong 100 ms after the motor turns off. At 50/50 there's half as long for it to die away, so the 50/50 pilot is expected to show more of these errors, not fewer.
+- **The 1s clip** at about 64,700, close to the 16-bit ADC maximum (65,535). The vibration value can't show differences in the strength of a 1, which limits comparing materials and distances by signal margin.
 
-- **Some errors (roughly 1–10%):** all cases give error rates to compare.
-- **No or almost no errors:** go ahead unchanged. The baseline is the clean control, and the disturbance cases are where the codes get compared.
+Only 8 bits were sent, so this is a first look and not a measurement. The pilot and settle sweep above give the actual baseline.
 
 ## Rules for every run
 
 - **Re-mount between runs.** Take the piezo and motor off and put them back on the marks before each new run number. Then the 3 runs measure how much mounting varies, rather than repeating one mounting.
 - **If a run stops,** run the exact same command again. It carries on from the last saved string.
-- **If the setup changed in the middle of a run,** delete that CSV, its `.png` and its `_raw/` folder, then run the command again from the start.
+- **If the setup changed in the middle of a run,** delete that run's folder, then run the command again from the start.
 - Write anything unusual in `--notes`. It's saved in every row.
+- **Each run tells you what it's doing,** in the terminal and the live viewer:
+  - `>>> Calibrating: keep the surface still (3 s)`
+  - `>>> Calibration complete, threshold N`, with a beep
+  - `>>> Starting in 3... 2... 1...`
+  - `>>> Sending now`, with a second beep, just before the first bit
+
+  Keep still until calibration is complete. In the disturbance cases, start the disturbance during the countdown so it's already going when sending starts. Don't start it before calibration is complete, or it raises the threshold. `--countdown N` changes the countdown length.
 - **`--live`** opens the viewer:
   - the raw piezo signal for the latest 6 bits, with each bit's measuring window and what it was read as;
   - the vibration per bit;
@@ -91,7 +129,7 @@ The pilot is only there to know what to expect. **It doesn't change the settings
   - a map of message bits still wrong after decoding;
   - the error statistics.
 
-  It saves the `.png` when the run finishes. Closing the window stops the run after the current string. To redraw a saved run: `python3 -m experiments.live_view experiments/results/<case>.csv`.
+  It saves the `.png` when the run finishes. Closing the window stops the run after the current string. A second window, **Raw signal scope**, shows the same raw signal scrolling smoothly, about 1.5 bits behind live. It runs on its own, so the main viewer's redraws don't make it stutter. To redraw a saved run: `python3 -m experiments.live_view experiments/results/<case>/<case>.csv`.
 - **Check `late_bits` in the CSV** after the first run. It should be 0 in every row.
 
 ## Order
@@ -108,49 +146,49 @@ Disturbances: replace the `<...>` in `--notes` with what made each one and where
 ### Round 1
 
 ```
-python3 -m experiments.run_case $PORT --material wood --distance 20 --noise none  --settle 50 --window 50 --prbs-per-code --sets 1 --run 1 --notes "30x6, baseline" --live
-python3 -m experiments.run_case $PORT --material wood --distance 20 --noise taps  --settle 50 --window 50 --prbs-per-code --sets 1 --run 1 --notes "30x6, random taps: <how/where>" --live
-python3 -m experiments.run_case $PORT --material wood --distance 20 --noise drone --settle 50 --window 50 --prbs-per-code --sets 1 --run 1 --notes "30x6, low drone: <source, freq, distance>" --live
-python3 -m experiments.run_case $PORT --material wood --distance 20 --noise burst --settle 50 --window 50 --prbs-per-code --sets 1 --run 1 --notes "30x6, high burst: <source, freq, distance>" --live
+python3 -m experiments.run_case $PORT --material wood --distance 20 --noise none  --settle 150 --window 50 --prbs-per-code --sets 1 --run 1 --notes "30x6, baseline" --live
+python3 -m experiments.run_case $PORT --material wood --distance 20 --noise taps  --settle 150 --window 50 --prbs-per-code --sets 1 --run 1 --notes "30x6, random taps: <how/where>" --live
+python3 -m experiments.run_case $PORT --material wood --distance 20 --noise drone --settle 150 --window 50 --prbs-per-code --sets 1 --run 1 --notes "30x6, low drone: <source, freq, distance>" --live
+python3 -m experiments.run_case $PORT --material wood --distance 20 --noise burst --settle 150 --window 50 --prbs-per-code --sets 1 --run 1 --notes "30x6, high burst: <source, freq, distance>" --live
 ```
 
 ```
-experiments/results/wood_20cm_none_S50_W50_Pprbs5_run1.csv
-experiments/results/wood_20cm_taps_S50_W50_Pprbs5_run1.csv
-experiments/results/wood_20cm_drone_S50_W50_Pprbs5_run1.csv
-experiments/results/wood_20cm_burst_S50_W50_Pprbs5_run1.csv
+experiments/results/wood_20cm_none_S150_W50_Pprbs5_run1/
+experiments/results/wood_20cm_taps_S150_W50_Pprbs5_run1/
+experiments/results/wood_20cm_drone_S150_W50_Pprbs5_run1/
+experiments/results/wood_20cm_burst_S150_W50_Pprbs5_run1/
 ```
 
 ### Round 2 (re-mount first)
 
 ```
-python3 -m experiments.run_case $PORT --material wood --distance 20 --noise none  --settle 50 --window 50 --prbs-per-code --sets 1 --run 2 --notes "30x6, baseline" --live
-python3 -m experiments.run_case $PORT --material wood --distance 20 --noise taps  --settle 50 --window 50 --prbs-per-code --sets 1 --run 2 --notes "30x6, random taps: <how/where>" --live
-python3 -m experiments.run_case $PORT --material wood --distance 20 --noise drone --settle 50 --window 50 --prbs-per-code --sets 1 --run 2 --notes "30x6, low drone: <source, freq, distance>" --live
-python3 -m experiments.run_case $PORT --material wood --distance 20 --noise burst --settle 50 --window 50 --prbs-per-code --sets 1 --run 2 --notes "30x6, high burst: <source, freq, distance>" --live
+python3 -m experiments.run_case $PORT --material wood --distance 20 --noise none  --settle 150 --window 50 --prbs-per-code --sets 1 --run 2 --notes "30x6, baseline" --live
+python3 -m experiments.run_case $PORT --material wood --distance 20 --noise taps  --settle 150 --window 50 --prbs-per-code --sets 1 --run 2 --notes "30x6, random taps: <how/where>" --live
+python3 -m experiments.run_case $PORT --material wood --distance 20 --noise drone --settle 150 --window 50 --prbs-per-code --sets 1 --run 2 --notes "30x6, low drone: <source, freq, distance>" --live
+python3 -m experiments.run_case $PORT --material wood --distance 20 --noise burst --settle 150 --window 50 --prbs-per-code --sets 1 --run 2 --notes "30x6, high burst: <source, freq, distance>" --live
 ```
 
 ```
-experiments/results/wood_20cm_none_S50_W50_Pprbs5_run2.csv
-experiments/results/wood_20cm_taps_S50_W50_Pprbs5_run2.csv
-experiments/results/wood_20cm_drone_S50_W50_Pprbs5_run2.csv
-experiments/results/wood_20cm_burst_S50_W50_Pprbs5_run2.csv
+experiments/results/wood_20cm_none_S150_W50_Pprbs5_run2/
+experiments/results/wood_20cm_taps_S150_W50_Pprbs5_run2/
+experiments/results/wood_20cm_drone_S150_W50_Pprbs5_run2/
+experiments/results/wood_20cm_burst_S150_W50_Pprbs5_run2/
 ```
 
 ### Round 3 (re-mount first)
 
 ```
-python3 -m experiments.run_case $PORT --material wood --distance 20 --noise none  --settle 50 --window 50 --prbs-per-code --sets 1 --run 3 --notes "30x6, baseline" --live
-python3 -m experiments.run_case $PORT --material wood --distance 20 --noise taps  --settle 50 --window 50 --prbs-per-code --sets 1 --run 3 --notes "30x6, random taps: <how/where>" --live
-python3 -m experiments.run_case $PORT --material wood --distance 20 --noise drone --settle 50 --window 50 --prbs-per-code --sets 1 --run 3 --notes "30x6, low drone: <source, freq, distance>" --live
-python3 -m experiments.run_case $PORT --material wood --distance 20 --noise burst --settle 50 --window 50 --prbs-per-code --sets 1 --run 3 --notes "30x6, high burst: <source, freq, distance>" --live
+python3 -m experiments.run_case $PORT --material wood --distance 20 --noise none  --settle 150 --window 50 --prbs-per-code --sets 1 --run 3 --notes "30x6, baseline" --live
+python3 -m experiments.run_case $PORT --material wood --distance 20 --noise taps  --settle 150 --window 50 --prbs-per-code --sets 1 --run 3 --notes "30x6, random taps: <how/where>" --live
+python3 -m experiments.run_case $PORT --material wood --distance 20 --noise drone --settle 150 --window 50 --prbs-per-code --sets 1 --run 3 --notes "30x6, low drone: <source, freq, distance>" --live
+python3 -m experiments.run_case $PORT --material wood --distance 20 --noise burst --settle 150 --window 50 --prbs-per-code --sets 1 --run 3 --notes "30x6, high burst: <source, freq, distance>" --live
 ```
 
 ```
-experiments/results/wood_20cm_none_S50_W50_Pprbs5_run3.csv
-experiments/results/wood_20cm_taps_S50_W50_Pprbs5_run3.csv
-experiments/results/wood_20cm_drone_S50_W50_Pprbs5_run3.csv
-experiments/results/wood_20cm_burst_S50_W50_Pprbs5_run3.csv
+experiments/results/wood_20cm_none_S150_W50_Pprbs5_run3/
+experiments/results/wood_20cm_taps_S150_W50_Pprbs5_run3/
+experiments/results/wood_20cm_drone_S150_W50_Pprbs5_run3/
+experiments/results/wood_20cm_burst_S150_W50_Pprbs5_run3/
 ```
 
 ---
@@ -158,29 +196,29 @@ experiments/results/wood_20cm_burst_S50_W50_Pprbs5_run3.csv
 ## Acrylic 30 × 6, 20 cm (re-mount between runs)
 
 ```
-python3 -m experiments.run_case $PORT --material acrylic --distance 20 --noise none --settle 50 --window 50 --prbs-per-code --sets 1 --run 1 --notes "30x6" --live
-python3 -m experiments.run_case $PORT --material acrylic --distance 20 --noise none --settle 50 --window 50 --prbs-per-code --sets 1 --run 2 --notes "30x6" --live
-python3 -m experiments.run_case $PORT --material acrylic --distance 20 --noise none --settle 50 --window 50 --prbs-per-code --sets 1 --run 3 --notes "30x6" --live
+python3 -m experiments.run_case $PORT --material acrylic --distance 20 --noise none --settle 150 --window 50 --prbs-per-code --sets 1 --run 1 --notes "30x6" --live
+python3 -m experiments.run_case $PORT --material acrylic --distance 20 --noise none --settle 150 --window 50 --prbs-per-code --sets 1 --run 2 --notes "30x6" --live
+python3 -m experiments.run_case $PORT --material acrylic --distance 20 --noise none --settle 150 --window 50 --prbs-per-code --sets 1 --run 3 --notes "30x6" --live
 ```
 
 ```
-experiments/results/acrylic_20cm_none_S50_W50_Pprbs5_run1.csv
-experiments/results/acrylic_20cm_none_S50_W50_Pprbs5_run2.csv
-experiments/results/acrylic_20cm_none_S50_W50_Pprbs5_run3.csv
+experiments/results/acrylic_20cm_none_S150_W50_Pprbs5_run1/
+experiments/results/acrylic_20cm_none_S150_W50_Pprbs5_run2/
+experiments/results/acrylic_20cm_none_S150_W50_Pprbs5_run3/
 ```
 
 ## PCB 30 × 6, 20 cm (re-mount between runs)
 
 ```
-python3 -m experiments.run_case $PORT --material pcb --distance 20 --noise none --settle 50 --window 50 --prbs-per-code --sets 1 --run 1 --notes "30x6" --live
-python3 -m experiments.run_case $PORT --material pcb --distance 20 --noise none --settle 50 --window 50 --prbs-per-code --sets 1 --run 2 --notes "30x6" --live
-python3 -m experiments.run_case $PORT --material pcb --distance 20 --noise none --settle 50 --window 50 --prbs-per-code --sets 1 --run 3 --notes "30x6" --live
+python3 -m experiments.run_case $PORT --material pcb --distance 20 --noise none --settle 150 --window 50 --prbs-per-code --sets 1 --run 1 --notes "30x6" --live
+python3 -m experiments.run_case $PORT --material pcb --distance 20 --noise none --settle 150 --window 50 --prbs-per-code --sets 1 --run 2 --notes "30x6" --live
+python3 -m experiments.run_case $PORT --material pcb --distance 20 --noise none --settle 150 --window 50 --prbs-per-code --sets 1 --run 3 --notes "30x6" --live
 ```
 
 ```
-experiments/results/pcb_20cm_none_S50_W50_Pprbs5_run1.csv
-experiments/results/pcb_20cm_none_S50_W50_Pprbs5_run2.csv
-experiments/results/pcb_20cm_none_S50_W50_Pprbs5_run3.csv
+experiments/results/pcb_20cm_none_S150_W50_Pprbs5_run1/
+experiments/results/pcb_20cm_none_S150_W50_Pprbs5_run2/
+experiments/results/pcb_20cm_none_S150_W50_Pprbs5_run3/
 ```
 
 ---
@@ -188,29 +226,29 @@ experiments/results/pcb_20cm_none_S50_W50_Pprbs5_run3.csv
 ## Extended wood, 30 cm (re-mount between runs)
 
 ```
-python3 -m experiments.run_case $PORT --material wood --distance 30 --noise none --settle 50 --window 50 --prbs-per-code --sets 1 --run 1 --notes "extended" --live
-python3 -m experiments.run_case $PORT --material wood --distance 30 --noise none --settle 50 --window 50 --prbs-per-code --sets 1 --run 2 --notes "extended" --live
-python3 -m experiments.run_case $PORT --material wood --distance 30 --noise none --settle 50 --window 50 --prbs-per-code --sets 1 --run 3 --notes "extended" --live
+python3 -m experiments.run_case $PORT --material wood --distance 30 --noise none --settle 150 --window 50 --prbs-per-code --sets 1 --run 1 --notes "extended" --live
+python3 -m experiments.run_case $PORT --material wood --distance 30 --noise none --settle 150 --window 50 --prbs-per-code --sets 1 --run 2 --notes "extended" --live
+python3 -m experiments.run_case $PORT --material wood --distance 30 --noise none --settle 150 --window 50 --prbs-per-code --sets 1 --run 3 --notes "extended" --live
 ```
 
 ```
-experiments/results/wood_30cm_none_S50_W50_Pprbs5_run1.csv
-experiments/results/wood_30cm_none_S50_W50_Pprbs5_run2.csv
-experiments/results/wood_30cm_none_S50_W50_Pprbs5_run3.csv
+experiments/results/wood_30cm_none_S150_W50_Pprbs5_run1/
+experiments/results/wood_30cm_none_S150_W50_Pprbs5_run2/
+experiments/results/wood_30cm_none_S150_W50_Pprbs5_run3/
 ```
 
 ## Extended wood, 50 cm (re-mount between runs)
 
 ```
-python3 -m experiments.run_case $PORT --material wood --distance 50 --noise none --settle 50 --window 50 --prbs-per-code --sets 1 --run 1 --notes "extended" --live
-python3 -m experiments.run_case $PORT --material wood --distance 50 --noise none --settle 50 --window 50 --prbs-per-code --sets 1 --run 2 --notes "extended" --live
-python3 -m experiments.run_case $PORT --material wood --distance 50 --noise none --settle 50 --window 50 --prbs-per-code --sets 1 --run 3 --notes "extended" --live
+python3 -m experiments.run_case $PORT --material wood --distance 50 --noise none --settle 150 --window 50 --prbs-per-code --sets 1 --run 1 --notes "extended" --live
+python3 -m experiments.run_case $PORT --material wood --distance 50 --noise none --settle 150 --window 50 --prbs-per-code --sets 1 --run 2 --notes "extended" --live
+python3 -m experiments.run_case $PORT --material wood --distance 50 --noise none --settle 150 --window 50 --prbs-per-code --sets 1 --run 3 --notes "extended" --live
 ```
 
 ```
-experiments/results/wood_50cm_none_S50_W50_Pprbs5_run1.csv
-experiments/results/wood_50cm_none_S50_W50_Pprbs5_run2.csv
-experiments/results/wood_50cm_none_S50_W50_Pprbs5_run3.csv
+experiments/results/wood_50cm_none_S150_W50_Pprbs5_run1/
+experiments/results/wood_50cm_none_S150_W50_Pprbs5_run2/
+experiments/results/wood_50cm_none_S150_W50_Pprbs5_run3/
 ```
 
 ---
@@ -220,37 +258,37 @@ experiments/results/wood_50cm_none_S50_W50_Pprbs5_run3.csv
 Materials:
 
 ```
-python3 -m experiments.summarise experiments/results/wood_20cm_none_*_Pprbs5_*.csv experiments/results/acrylic_*_Pprbs5_*.csv experiments/results/pcb_*_Pprbs5_*.csv
+python3 -m experiments.summarise experiments/results/wood_20cm_none_*_Pprbs5_*/*.csv experiments/results/acrylic_*_Pprbs5_*/*.csv experiments/results/pcb_*_Pprbs5_*/*.csv
 ```
 
 Disturbances against the baseline:
 
 ```
-python3 -m experiments.summarise experiments/results/wood_20cm_*_Pprbs5_*.csv
+python3 -m experiments.summarise experiments/results/wood_20cm_*_Pprbs5_*/*.csv
 ```
 
 Distance:
 
 ```
-python3 -m experiments.summarise experiments/results/wood_20cm_none_*_Pprbs5_*.csv experiments/results/wood_30cm_*_Pprbs5_*.csv experiments/results/wood_50cm_*_Pprbs5_*.csv
+python3 -m experiments.summarise experiments/results/wood_20cm_none_*_Pprbs5_*/*.csv experiments/results/wood_30cm_*_Pprbs5_*/*.csv experiments/results/wood_50cm_*_Pprbs5_*/*.csv
 ```
 
 Check that all 24 files exist (should print 24):
 
 ```
-ls experiments/results/*_Pprbs5_run*.csv | wc -l
+ls experiments/results/*_Pprbs5_run*/*.csv | wc -l
 ```
 
-The earlier trial results are in `archive/trial_results/`, so `experiments/results/` only holds this suite. Running `python3 -m experiments.summarise` with no file names summarises all of it.
+The earlier trial results are in `archive/trial_results/` and pilots go in `archive/pilot/`, so `experiments/results/` only holds this suite. Running `python3 -m experiments.summarise` with no file names summarises all of it.
 
 ## Notes for the report
 
 - **Distance is mixed up with geometry.** The 20 cm baseline uses the 30 × 6 specimen, but 30 cm and 50 cm use the extended one. If there's time, run extended wood at 20 cm as a control. Using `wood-ext` keeps it from overwriting the baseline:
 
   ```
-  python3 -m experiments.run_case $PORT --material wood-ext --distance 20 --noise none --settle 50 --window 50 --prbs-per-code --sets 1 --run 1 --notes "extended, geometry control" --live
+  python3 -m experiments.run_case $PORT --material wood-ext --distance 20 --noise none --settle 150 --window 50 --prbs-per-code --sets 1 --run 1 --notes "extended, geometry control" --live
   ```
-  → `experiments/results/wood-ext_20cm_none_S50_W50_Pprbs5_run1.csv`
+  → `experiments/results/wood-ext_20cm_none_S150_W50_Pprbs5_run1/`
 
 - **Signal margin when there are no errors.** Every CSV stores the measured vibration for each bit (`vibration`) and the threshold. For each run, take the gap between the weakest "1" and the strongest "0", relative to the threshold. A smaller gap means that setup is closer to failing, even if it made no errors yet. Use this to compare materials and distances if their error rates are all zero.
 

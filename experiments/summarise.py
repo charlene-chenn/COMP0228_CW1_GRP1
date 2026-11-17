@@ -1,7 +1,7 @@
 """
 Print the error and transmission rates for saved test cases:
     python3 -m experiments.summarise                         # every real case
-    python3 -m experiments.summarise experiments/results/wood_20cm_none_S50_W50_run1.csv
+    python3 -m experiments.summarise experiments/results/<case>/<case>.csv
 
 The confidence intervals treat bits as independent. Bursts break that assumption,
 so treat the intervals as too narrow if the PRBS results show bursts.
@@ -116,7 +116,10 @@ def print_summary(paths: Iterable[Path]) -> None:
 
 
 def main():
-    paths = [Path(arg) for arg in sys.argv[1:]] or sorted(RESULTS_DIR.glob("*.csv"))
+    # Each case has its own folder. Simulated cases (results/sim/) are left out
+    paths = [Path(arg) for arg in sys.argv[1:]] or sorted(
+        path for path in RESULTS_DIR.glob("*/*.csv") if path.parent.name != "sim"
+    )
     if not paths:
         print("No results yet.")
         return

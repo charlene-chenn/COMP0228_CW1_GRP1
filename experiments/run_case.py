@@ -4,7 +4,7 @@ Run one test case: a fixed material, distance and noise source, through every co
 From the project folder (close the Arduino Serial Monitor first):
     python3 -m experiments.run_case PORT --material wood --distance 20 --settle 50 --window 50 --live
 
-A case runs these blocks, and saves each string to experiments/results/<case>.csv:
+A case runs these blocks, and saves each string to experiments/results/<case>/<case>.csv:
     prbs5      PRBS-5, repeated (uncoded), to characterise the noise
     codes      random 32-bit messages, each sent through every code in a shuffled order
     reference  PRBS-5 once more, to compare with the start and check for drift
@@ -13,10 +13,14 @@ With --prbs-per-code the case is just the codes block, and every code sends
 the same PRBS-5 string as its message. The "none" code is then the uncoded
 baseline, so there is no separate PRBS-5 block or reference.
 
-The raw piezo samples for every string are saved too, in
-experiments/results/<case>_raw/<block>_<index>_<code>.npz (see save_raw for what
-each file holds). Use --no-raw to skip them, and keep the choice the same for
+Everything from a case goes in its own folder, experiments/results/<case>/:
+    <case>.csv   one row per string
+    <case>.png   the live viewer at the end (with --live)
+    raw/<block>_<index>_<code>.npz   the raw piezo samples of each string (see save_raw) Use --no-raw to skip them, and keep the choice the same for
 every run, as streaming them takes a few ms per bit out of the settle time.
+
+When a case finishes, a video of its raw signal is made too, <case>.mp4 in the
+same folder (see experiments/make_video.py). Use --no-video to skip it.
 
 Re-run the same command to carry on after a stop. Finished strings are skipped.
 Use --prbs-only for a quick look at a setting, and --sim to try this with no hardware.
@@ -43,6 +47,7 @@ from experiments.summarise import print_summary
 
 RESULTS_DIR = Path(__file__).parent / "results"
 RECALIBRATE_REST_S = 1.0  # Lets the motor stop first, so it doesn't count as noise
+CALIBRATION_S = 3         # Must match CALIBRATION_MS in piezo_receiver_v3.ino
 
 FIELDS = [
     "timestamp", "case", "source", "material", "distance_cm", "noise", "run", "notes",
@@ -210,6 +215,31 @@ def run_trial(link, trial: Trial, on_bit=None, raw_dir: Optional[Path] = None) -
     }
 
 
+def announce(message: str, events: Optional[queue.Queue] = None, beep: bool = False) -> None:
+    """Tell the person running the case, in the terminal and in the live viewer."""
+    print(("\a" if beep else "") + message, flush=True)
+    if events is not None:
+        events.put(("status", message))
+
+
+def calibrate(link, events, set_window: Optional[int] = None) -> None:
+    """Calibrate (by setting the window, or directly), saying when it starts and ends."""
+    announce(f">>> Calibrating: keep the surface still ({CALIBRATION_S} s)", events)
+    if set_window is not None:
+        link.set_window_ms(set_window)  # This also calibrates
+    else:
+        link.calibrate()
+    announce(f">>> Calibration complete, threshold {link.threshold}", events, beep=True)
+
+
+def countdown(seconds: int, events) -> None:
+    """Count down before the first bit, so a disturbance can be started in time."""
+    for left in range(seconds, 0, -1):
+        announce(f">>> Starting in {left}...", events)
+        time.sleep(1)
+    announce(">>> Sending now", events, beep=True)
+
+
 def run_case(link, args, case: str, path: Path, fixed: dict,
              events: Optional[queue.Queue] = None,
              stop: Optional[threading.Event] = None) -> bool:
@@ -239,12 +269,11 @@ def run_case(link, args, case: str, path: Path, fixed: dict,
         return True
 
     link.set_settle_ms(args.settle)
-    link.set_window_ms(args.window)  # This also calibrates
-    print("Threshold:", link.threshold)
+    calibrate(link, events, set_window=args.window)
 
     # The Arduino link doesn't keep these, but the raw files need them
     link.settle_ms, link.window_ms = args.settle, args.window
-    raw_dir = None if args.no_raw else path.parent / f"{case}_raw"
+    raw_dir = None if args.no_raw else path.parent / "raw"
 
     if events is not None:
         events.put(("config", args.settle, args.window, getattr(link, "sample_rate", 0)))
@@ -258,6 +287,7 @@ def run_case(link, args, case: str, path: Path, fixed: dict,
             file.flush()
 
         previous_block = None
+        countdown(args.countdown, events)
         for number, trial in enumerate(remaining, 1):
             if stop is not None and stop.is_set():
                 return False
@@ -265,8 +295,8 @@ def run_case(link, args, case: str, path: Path, fixed: dict,
             # One threshold per block, so a block's strings are all judged alike
             if previous_block not in (None, "codes") and trial.block == "codes":
                 time.sleep(RECALIBRATE_REST_S)
-                link.calibrate()
-                print("Threshold:", link.threshold)
+                calibrate(link, events)
+                countdown(args.countdown, events)
             previous_block = trial.block
 
             on_bit = None
@@ -334,6 +364,10 @@ def parse_args():
                         help="send PRBS-5 through every code, --sets times, and nothing else")
     parser.add_argument("--live", action="store_true", help="show the live viewer")
     parser.add_argument("--no-raw", action="store_true", help="don't record the raw piezo samples")
+    parser.add_argument("--countdown", type=int, default=3,
+                        help="seconds to count down after calibrating, before sending (0 for none)")
+    parser.add_argument("--no-video", action="store_true",
+                        help="don't make a video of the raw signal when the case finishes")
     parser.add_argument("--sim", action="store_true", help="use a simulated channel")
 
     args = parser.parse_args()
@@ -346,13 +380,26 @@ def parse_args():
     return args
 
 
+def finish(args, path: Path) -> None:
+    """Make the raw signal video for a finished case."""
+    if args.no_raw or args.no_video:
+        return
+    from experiments.make_video import make_video
+    try:
+        print("Saved", make_video(path))
+    except (SystemExit, RuntimeError) as error:
+        # The results are already saved, so a missing ffmpeg shouldn't look like a failed run
+        print(f"No video made: {error}")
+
+
 def main():
     args = parse_args()
     source = "sim" if args.sim else "hardware"
     case = case_name(args, source)
 
     # Kept apart so that simulated strings can't end up in the real results
-    folder = RESULTS_DIR / "sim" if args.sim else RESULTS_DIR
+    # Each case gets its own folder holding its CSV, picture and raw samples
+    folder = (RESULTS_DIR / "sim" if args.sim else RESULTS_DIR) / case
     folder.mkdir(parents=True, exist_ok=True)
     path = folder / f"{case}.csv"
 
@@ -372,10 +419,12 @@ def main():
         return ArduinoLink(args.port, raw=not args.no_raw)
 
     if not args.live:
-        print("Connecting, keep the surface still...")
+        print("Connecting (up to about 10 s), keep the surface still...")
         with connect() as link:
-            run_case(link, args, case, path, fixed)
+            finished = run_case(link, args, case, path, fixed)
         print_summary([path])
+        if finished:
+            finish(args, path)
         return
 
     # The viewer has to stay on the main thread, so the case runs on another
@@ -391,7 +440,7 @@ def main():
     )
 
     check_header(path)
-    for event in saved_events(load_done(path), path.parent / f"{case}_raw"):
+    for event in saved_events(load_done(path), path.parent / "raw"):
         events.put(event)
 
     def work():
@@ -418,6 +467,8 @@ def main():
         print("Stopped early. Run the same command again to carry on.")
     if path.exists():
         print_summary([path])
+    if outcome["finished"]:
+        finish(args, path)
 
 
 if __name__ == "__main__":

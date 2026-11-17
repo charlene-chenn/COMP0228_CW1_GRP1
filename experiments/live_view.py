@@ -6,11 +6,13 @@ Colour always means the bit that was sent: orange = sent 0, blue = sent 1.
 
 With raw recording on (the default), the top panel shows the raw piezo signal
 for the latest bits, with each bit's measuring window and the bit it was read as.
+A second window, "Raw signal scope", shows the same signal scrolling smoothly
+(see experiments/scope.py).
 With --prbs-per-code, the coded strings get a channel error map, and a second map
 shows which message bits were still wrong after decoding.
 
 To redraw a saved case, for example for the report:
-    python3 -m experiments.live_view experiments/results/<case>.csv
+    python3 -m experiments.live_view experiments/results/<case>/<case>.csv
 """
 import csv
 import queue
@@ -20,12 +22,12 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
-from matplotlib.animation import FuncAnimation
 from matplotlib.colors import BoundaryNorm, ListedColormap
 from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
 
 from codes import CODES
+from experiments.scope import RawScope, ScopeWindow
 from experiments.sequences import map_key, prbs_name, row_label, shown
 from experiments.summarise import wilson
 
@@ -43,9 +45,8 @@ NOT_SENT, CORRECT, WRONG_SENT_0, WRONG_SENT_1 = 0, 1, 2, 3
 RASTER_COLOURS = [SURFACE, GRID, SENT_0, SENT_1]
 
 STRIP_BITS = 120     # How many of the latest bits to show in the vibration strip
-RAW_BITS = 6         # How many of the latest bits to show in the raw signal
 MAX_RUN_SHOWN = 8    # Longer error runs are counted in the last bar
-REFRESH_MS = 200
+REFRESH_MS = 300     # How often to check for updates and redraw
 
 
 def map_layout(strings) -> list:
@@ -160,7 +161,11 @@ class LiveView:
         self.settle_ms = 0
         self.window_ms = 0
         self.sample_rate = 0
-        self.raw_bits = deque(maxlen=RAW_BITS)   # (samples, sent, read) for the latest bits
+
+        self.scope = None        # The raw panel, a RawScope
+        self.scope_window = None # The separate smooth scope window, while live
+        self.dirty = True        # Something changed since the last redraw
+        self.saved = False
 
         self.status = "Waiting"
         self.finished = False
@@ -232,7 +237,8 @@ class LiveView:
             self._build_raster(info, show_legend=number == 0)
         self.ax_stats.axis("off")
         if self.ax_raw is not None:
-            self._draw_raw()
+            self.ax_raw.set_title("Raw piezo signal, latest bits", loc="left", fontsize=11)
+            self.scope = RawScope(self.ax_raw)
 
     def _build_strip(self) -> None:
         ax = self.ax_strip
@@ -295,6 +301,7 @@ class LiveView:
             self.row = info["rows"].index(row_id)
             self.position = 0
             label = info["labels"][self.row]
+            self._to_scopes("string")
             if key == "channel":
                 self.status = f"Coded {label}, string {self.row + 1} of {len(info['labels'])}"
             else:
@@ -304,7 +311,7 @@ class LiveView:
             _, index, bit, vibration, raw = event
             self._add_bit(index, bit, vibration)
             if raw is not None:
-                self.raw_bits.append((raw, self.sent[index], bit))
+                self._to_scopes("bit", raw, self.sent[index], bit)
 
         elif kind == "decoded":
             _, row_id, message, decoded = event
@@ -316,6 +323,7 @@ class LiveView:
 
         elif kind == "config":
             _, self.settle_ms, self.window_ms, self.sample_rate = event
+            self._to_scopes("config", self.settle_ms, self.window_ms, self.sample_rate)
 
         elif kind == "status":
             self.status = event[1]
@@ -353,21 +361,49 @@ class LiveView:
             self.runs[self.run] += 1
         self.run = 0
 
-    def update(self, _frame=None) -> None:
-        """Apply any waiting updates, then redraw once."""
-        changed = False
+    def _drain(self) -> None:
+        """Apply any waiting updates from the running case."""
         while True:
             try:
                 self._handle(self.events.get_nowait())
-                changed = True
+                self.dirty = True
             except queue.Empty:
                 break
 
-        if changed:
-            self._draw()
+    def _to_scopes(self, kind: str, *details) -> None:
+        """Pass raw signal updates to the raw panel and the scope window."""
+        if self.scope_window is not None:
+            self.scope_window.send(kind, *details)
+        if self.scope is None:
+            return
+        if kind == "config":
+            self.scope.configure(*details)
+        elif kind == "string":
+            self.scope.start_string()
+        elif kind == "bit":
+            self.scope.add_bit(*details)
 
-        if changed and self.finished and self.save_path is not None:
-            self.fig.savefig(self.save_path, dpi=150, facecolor=SURFACE)
+    def update(self, _frame=None) -> None:
+        """Apply any waiting updates and draw everything."""
+        self._drain()
+        self._draw()
+        if self.finished and self.save_path is not None:
+            self._save()
+
+    def _tick(self) -> None:
+        """Timer: take in updates and redraw if anything changed."""
+        self._drain()
+        if not self.dirty:
+            return
+        self.dirty = False
+        self._draw()
+        self.fig.canvas.draw_idle()
+        if self.finished and self.save_path is not None and not self.saved:
+            self.saved = True
+            self._save()
+
+    def _save(self) -> None:
+        self.fig.savefig(self.save_path, dpi=150, facecolor=SURFACE)
 
     def _draw(self) -> None:
         detail = self.status
@@ -377,61 +413,15 @@ class LiveView:
             detail += f"  |  threshold {self.threshold:,}"
         self.subtitle.set_text(detail)
 
-        if self.ax_raw is not None:
-            self._draw_raw()
+        if self.scope is not None:
+            self.scope.show_newest()
+            self.scope.render()
         self._draw_strip()
         for info in self.maps.values():
             info["image"].set_data(info["raster"])
         self._draw_stats()
         self._draw_after()
         self._draw_runs()
-
-    def _draw_raw(self) -> None:
-        ax = self.ax_raw
-        ax.clear()
-        self._style(ax, f"Raw piezo signal, latest {RAW_BITS} bits", "Time (ms)", "ADC counts")
-        ax.grid(False)
-        ax.legend(
-            handles=[
-                Patch(color=SENT_0, alpha=0.25, label="Sent 0"),
-                Patch(color=SENT_1, alpha=0.25, label="Sent 1"),
-                Patch(facecolor="none", edgecolor=INK_SECONDARY, label="Measuring window"),
-            ],
-            loc="lower right", bbox_to_anchor=(1, 1), ncol=3, frameon=False, fontsize=9,
-        )
-        if not self.raw_bits or not self.sample_rate:
-            ax.text(0.5, 0.5, "Waiting for raw samples", transform=ax.transAxes,
-                    ha="center", va="center", color=MUTED)
-            return
-
-        ms_per_sample = 1000 / self.sample_rate
-        start = 0
-        low = min(int(r.min()) for r, _, _ in self.raw_bits)
-        high = max(int(r.max()) for r, _, _ in self.raw_bits)
-        pad = max(high - low, 1) * 0.08
-
-        for samples, sent, read in self.raw_bits:
-            t = (start + np.arange(len(samples))) * ms_per_sample
-            end = start + len(samples)
-            colour = SENT_0 if sent == 0 else SENT_1
-            ax.axvspan(start * ms_per_sample, end * ms_per_sample, color=colour, alpha=0.10, linewidth=0)
-
-            window_start = start * ms_per_sample + self.settle_ms
-            ax.add_patch(plt.Rectangle(
-                (window_start, low - pad * 0.5), self.window_ms, high - low + pad,
-                fill=False, edgecolor=INK_SECONDARY, linewidth=0.8, linestyle="--",
-            ))
-            ax.plot(t, samples, color=INK, linewidth=0.6)
-
-            wrong = read != sent
-            ax.text((start + end) / 2 * ms_per_sample, high + pad * 1.2,
-                    f"sent {sent}, read {read}" + ("  ✗" if wrong else ""),
-                    ha="center", va="bottom", fontsize=9,
-                    color=BAD_MARK if wrong else INK_SECONDARY, weight="bold" if wrong else "normal")
-            start = end
-
-        ax.set_xlim(0, start * ms_per_sample)
-        ax.set_ylim(low - pad, high + pad * 3.5)
 
     def _draw_strip(self) -> None:
         if not self.strip:
@@ -528,10 +518,17 @@ class LiveView:
         """Open the window and refresh it until it is closed."""
         if self.stop is not None:
             self.fig.canvas.mpl_connect("close_event", lambda _: self.stop.set())
-        self.animation = FuncAnimation(
-            self.fig, self.update, interval=REFRESH_MS, cache_frame_data=False,
-        )
-        plt.show()
+        if self.show_raw:
+            self.scope_window = ScopeWindow(self.case)
+            self.scope_window.send("config", self.settle_ms, self.window_ms, self.sample_rate)
+        self.timer = self.fig.canvas.new_timer(interval=REFRESH_MS)
+        self.timer.add_callback(self._tick)
+        self.timer.start()
+        try:
+            plt.show()
+        finally:
+            if self.scope_window is not None:
+                self.scope_window.close()
 
 
 def main():
@@ -548,7 +545,7 @@ def main():
         for row in rows.values() if shown(row["block"], row["seed"])
     )
 
-    raw_dir = path.parent / f"{path.stem}_raw"
+    raw_dir = path.parent / "raw"
     has_raw = any(row.get("raw_file") for row in rows.values())
     first = next(iter(rows.values()), {})
 
