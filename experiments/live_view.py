@@ -4,6 +4,11 @@ Closing the window stops the case at the end of the current string.
 
 Colour always means the bit that was sent: orange = sent 0, blue = sent 1.
 
+With raw recording on (the default), the top panel shows the raw piezo signal
+for the latest bits, with each bit's measuring window and the bit it was read as.
+With --prbs-per-code, the coded strings get a channel error map, and a second map
+shows which message bits were still wrong after decoding.
+
 To redraw a saved case, for example for the report:
     python3 -m experiments.live_view experiments/results/<case>.csv
 """
@@ -20,7 +25,8 @@ from matplotlib.colors import BoundaryNorm, ListedColormap
 from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
 
-from experiments.sequences import prbs_name, row_label
+from codes import CODES
+from experiments.sequences import map_key, prbs_name, row_label, shown
 from experiments.summarise import wilson
 
 SURFACE = "#fcfcfb"
@@ -36,62 +42,125 @@ BAD_MARK = "#0b0b0b"
 NOT_SENT, CORRECT, WRONG_SENT_0, WRONG_SENT_1 = 0, 1, 2, 3
 RASTER_COLOURS = [SURFACE, GRID, SENT_0, SENT_1]
 
-STRIP_BITS = 120     # How many of the latest bits to show at the top
+STRIP_BITS = 120     # How many of the latest bits to show in the vibration strip
+RAW_BITS = 6         # How many of the latest bits to show in the raw signal
 MAX_RUN_SHOWN = 8    # Longer error runs are counted in the last bar
 REFRESH_MS = 200
 
 
 def map_layout(strings) -> list:
     """
-    Work out the error maps to draw, one for each length of PRBS string.
+    Work out the error maps to draw: one for each length of PRBS string, and for
+    coded strings one map of channel bits and one of decoded message bits.
 
     Args:
-        strings: (block, index, length) for each PRBS string, in the order sent.
+        strings: (block, index, code, channel bits, message bits) for each string
+            the viewer shows, in the order sent.
 
     Returns:
-        list: (length, row labels) for each map.
+        list: a dict for each map, with its key, title, x label, width, and the
+        id (block, index, code) and label of each row.
     """
-    maps = {}
-    for block, index, length in strings:
-        maps.setdefault(length, []).append(row_label(block, int(index)))
-    return list(maps.items())
+    prbs_maps, coded = {}, []
+    for block, index, code, length, message_length in strings:
+        row = (block, int(index), code)
+        if block == "codes":
+            coded.append((row, length, message_length))
+        else:
+            spec = prbs_maps.setdefault(length, {
+                "key": map_key(block, length),
+                "title": f"{prbs_name(length)} error map: where each string went wrong",
+                "xlabel": f"Position in {prbs_name(length)} string (bit)",
+                "width": length, "rows": [], "labels": [],
+            })
+            spec["rows"].append(row)
+            spec["labels"].append(row_label(block, int(index)))
+
+    maps = list(prbs_maps.values())
+    if not coded:
+        return maps
+
+    # Rows in a fixed code order, whatever order they were sent in
+    order = list(CODES)
+    coded.sort(key=lambda item: (item[0][1], order.index(item[0][2])))
+    several_sets = len({row[1] for row, _, _ in coded}) > 1
+    rows = [row for row, _, _ in coded]
+    labels = [f"{code} #{index + 1}" if several_sets else code for _, index, code in rows]
+
+    maps.append({
+        "key": "channel", "title": "Channel bits: where each coded string went wrong",
+        "xlabel": "Position in coded string (bit)",
+        "width": max(length for _, length, _ in coded), "rows": rows, "labels": labels,
+    })
+    maps.append({
+        "key": "decoded", "title": "Decoded message: bits still wrong after decoding",
+        "xlabel": "Position in message (bit)",
+        "width": max(length for _, _, length in coded), "rows": list(rows), "labels": list(labels),
+    })
+    return maps
 
 
-def saved_events(rows: dict) -> list:
-    """Turn saved PRBS strings back into viewer updates, so a resumed run shows them."""
+def load_raw(path: Path):
+    """The raw samples of each bit in a saved .npz, or None if there isn't one."""
+    if not path.exists():
+        return None
+    data = np.load(path)
+    starts = data["bit_start"]
+    return [data["samples"][starts[i]:starts[i + 1]] for i in range(len(starts) - 1)]
+
+
+def saved_events(rows: dict, raw_dir: Path = None) -> list:
+    """Turn saved strings back into viewer updates, so a resumed run shows them."""
     events = []
     for row in rows.values():
-        if row["block"] == "codes":
+        if not shown(row["block"], row["seed"]):
             continue
-        label = row_label(row["block"], int(row["index"]))
+        row_id = (row["block"], int(row["index"]), row["code"])
         sent = [int(bit) for bit in row["sent"]]
-        events.append(("trial", label, sent, int(row["threshold"])))
+        events.append(("trial", map_key(row["block"], len(sent)), row_id, sent, int(row["threshold"])))
+
+        raw = None
+        if raw_dir is not None and row.get("raw_file"):
+            raw = load_raw(raw_dir.parent / row["raw_file"])
         vibration = row["vibration"].split()
         for i, (bit, vib) in enumerate(zip(row["received"], vibration)):
-            events.append(("bit", i, int(bit), int(vib)))
+            events.append(("bit", i, int(bit), int(vib), raw[i] if raw is not None else None))
+
+        if row["block"] == "codes":
+            message = [int(bit) for bit in row["message"]]
+            decoded = [int(bit) for bit in row["decoded"]]
+            events.append(("decoded", row_id, message, decoded))
     return events
 
 
 class LiveView:
-    def __init__(self, events: queue.Queue, case: str, layout: list, stop=None, save_path=None):
+    def __init__(self, events: queue.Queue, case: str, layout: list, stop=None, save_path=None,
+                 raw: bool = False):
         """
         Set up the window.
 
         Args:
             events (queue.Queue): updates from the running case.
             case (str): the case name for the title.
-            layout (list): (length, row labels) for each error map, from map_layout.
+            layout (list): the error maps, from map_layout.
             stop (threading.Event, optional): set when the window closes.
             save_path (Path, optional): where to save a picture when the case ends.
+            raw (bool, optional): show the raw signal panel. Defaults to False.
         """
         self.events = events
         self.case = case
         self.maps = {
-            length: {"labels": labels, "raster": np.full((len(labels), length), NOT_SENT)}
-            for length, labels in layout
+            spec["key"]: {**spec, "raster": np.full((len(spec["rows"]), spec["width"]), NOT_SENT)}
+            for spec in layout
         }
         self.stop = stop
         self.save_path = save_path
+        self.show_raw = raw
+
+        self.settle_ms = 0
+        self.window_ms = 0
+        self.sample_rate = 0
+        self.raw_bits = deque(maxlen=RAW_BITS)   # (samples, sent, read) for the latest bits
 
         self.status = "Waiting"
         self.finished = False
@@ -124,21 +193,28 @@ class LiveView:
             "ytick.color": MUTED,
         })
 
-        self.fig = plt.figure(figsize=(13, 8.5), facecolor=SURFACE)
-        self.fig.canvas.manager.set_window_title("PRBS live view")
         # A map with few rows, like a single PRBS-9 string, doesn't need much height
         map_heights = [0.3 + 0.1 * len(m["labels"]) for m in self.maps.values()]
+        top_heights = [1.3, 1.1] if self.show_raw else [1.1]
+        height = 8.5 + (2.0 if self.show_raw else 0) + 0.8 * max(0, len(map_heights) - 1)
+
+        self.fig = plt.figure(figsize=(13, height), facecolor=SURFACE)
+        self.fig.canvas.manager.set_window_title("PRBS live view")
         grid = self.fig.add_gridspec(
-            2 + len(map_heights), 3, height_ratios=[1.1, *map_heights, 1.1],
+            len(top_heights) + len(map_heights) + 1, 3,
+            height_ratios=[*top_heights, *map_heights, 1.1],
             width_ratios=[0.8, 1, 1.2],
-            left=0.06, right=0.98, top=0.88, bottom=0.08, hspace=0.62, wspace=0.26,
+            left=0.09 if "channel" in self.maps else 0.06, right=0.98,
+            top=1 - 1.0 / height, bottom=0.7 / height,
+            hspace=0.62, wspace=0.26,
         )
 
-        self.title = self.fig.text(0.06, 0.955, self.case, fontsize=14, weight="bold")
-        self.subtitle = self.fig.text(0.06, 0.925, "", color=INK_SECONDARY)
+        self.title = self.fig.text(0.06, 1 - 0.38 / height, self.case, fontsize=14, weight="bold")
+        self.subtitle = self.fig.text(0.06, 1 - 0.64 / height, "", color=INK_SECONDARY)
 
-        self.ax_strip = self.fig.add_subplot(grid[0, :])
-        for row, info in enumerate(self.maps.values(), 1):
+        self.ax_raw = self.fig.add_subplot(grid[0, :]) if self.show_raw else None
+        self.ax_strip = self.fig.add_subplot(grid[len(top_heights) - 1, :])
+        for row, info in enumerate(self.maps.values(), len(top_heights)):
             info["ax"] = self.fig.add_subplot(grid[row, :])
         self.ax_stats = self.fig.add_subplot(grid[-1, 0])
         self.ax_after = self.fig.add_subplot(grid[-1, 1])
@@ -152,9 +228,11 @@ class LiveView:
             ax.tick_params(length=0)
 
         self._build_strip()
-        for number, (length, info) in enumerate(self.maps.items()):
-            self._build_raster(length, info, show_legend=number == 0)
+        for number, info in enumerate(self.maps.values()):
+            self._build_raster(info, show_legend=number == 0)
         self.ax_stats.axis("off")
+        if self.ax_raw is not None:
+            self._draw_raw()
 
     def _build_strip(self) -> None:
         ax = self.ax_strip
@@ -182,11 +260,10 @@ class LiveView:
             loc="lower right", bbox_to_anchor=(1, 1), ncol=3, frameon=False, fontsize=9,
         )
 
-    def _build_raster(self, length: int, info: dict, show_legend: bool) -> None:
+    def _build_raster(self, info: dict, show_legend: bool) -> None:
         ax = info["ax"]
-        name = prbs_name(length)
-        ax.set_title(f"{name} error map: where each string went wrong", loc="left", fontsize=11)
-        ax.set_xlabel(f"Position in {name} string (bit)")
+        ax.set_title(info["title"], loc="left", fontsize=11)
+        ax.set_xlabel(info["xlabel"])
         ax.set_yticks(range(len(info["labels"])), info["labels"], fontsize=8)
 
         info["image"] = ax.imshow(
@@ -212,16 +289,33 @@ class LiveView:
 
         if kind == "trial":
             self._end_run()
-            _, label, self.sent, self.threshold = event
-            info = self.maps[len(self.sent)]
+            _, key, row_id, self.sent, self.threshold = event
+            info = self.maps[key]
             self.raster = info["raster"]
-            self.row = info["labels"].index(label)
+            self.row = info["rows"].index(row_id)
             self.position = 0
-            self.status = f"{prbs_name(len(self.sent))} {label} of {len(info['labels'])}"
+            label = info["labels"][self.row]
+            if key == "channel":
+                self.status = f"Coded {label}, string {self.row + 1} of {len(info['labels'])}"
+            else:
+                self.status = f"{prbs_name(len(self.sent))} {label} of {len(info['labels'])}"
 
         elif kind == "bit":
-            _, index, bit, vibration = event
+            _, index, bit, vibration, raw = event
             self._add_bit(index, bit, vibration)
+            if raw is not None:
+                self.raw_bits.append((raw, self.sent[index], bit))
+
+        elif kind == "decoded":
+            _, row_id, message, decoded = event
+            info = self.maps["decoded"]
+            row = info["rows"].index(row_id)
+            for i, (want, got) in enumerate(zip(message, decoded)):
+                info["raster"][row, i] = CORRECT if want == got else (
+                    WRONG_SENT_0 if want == 0 else WRONG_SENT_1)
+
+        elif kind == "config":
+            _, self.settle_ms, self.window_ms, self.sample_rate = event
 
         elif kind == "status":
             self.status = event[1]
@@ -277,18 +371,67 @@ class LiveView:
 
     def _draw(self) -> None:
         detail = self.status
-        if self.sent and self.status.startswith("PRBS"):
+        if self.sent and self.status.startswith(("PRBS", "Coded")):
             detail += f", bit {self.position} of {len(self.sent)}"
         if self.threshold:
             detail += f"  |  threshold {self.threshold:,}"
         self.subtitle.set_text(detail)
 
+        if self.ax_raw is not None:
+            self._draw_raw()
         self._draw_strip()
         for info in self.maps.values():
             info["image"].set_data(info["raster"])
         self._draw_stats()
         self._draw_after()
         self._draw_runs()
+
+    def _draw_raw(self) -> None:
+        ax = self.ax_raw
+        ax.clear()
+        self._style(ax, f"Raw piezo signal, latest {RAW_BITS} bits", "Time (ms)", "ADC counts")
+        ax.grid(False)
+        ax.legend(
+            handles=[
+                Patch(color=SENT_0, alpha=0.25, label="Sent 0"),
+                Patch(color=SENT_1, alpha=0.25, label="Sent 1"),
+                Patch(facecolor="none", edgecolor=INK_SECONDARY, label="Measuring window"),
+            ],
+            loc="lower right", bbox_to_anchor=(1, 1), ncol=3, frameon=False, fontsize=9,
+        )
+        if not self.raw_bits or not self.sample_rate:
+            ax.text(0.5, 0.5, "Waiting for raw samples", transform=ax.transAxes,
+                    ha="center", va="center", color=MUTED)
+            return
+
+        ms_per_sample = 1000 / self.sample_rate
+        start = 0
+        low = min(int(r.min()) for r, _, _ in self.raw_bits)
+        high = max(int(r.max()) for r, _, _ in self.raw_bits)
+        pad = max(high - low, 1) * 0.08
+
+        for samples, sent, read in self.raw_bits:
+            t = (start + np.arange(len(samples))) * ms_per_sample
+            end = start + len(samples)
+            colour = SENT_0 if sent == 0 else SENT_1
+            ax.axvspan(start * ms_per_sample, end * ms_per_sample, color=colour, alpha=0.10, linewidth=0)
+
+            window_start = start * ms_per_sample + self.settle_ms
+            ax.add_patch(plt.Rectangle(
+                (window_start, low - pad * 0.5), self.window_ms, high - low + pad,
+                fill=False, edgecolor=INK_SECONDARY, linewidth=0.8, linestyle="--",
+            ))
+            ax.plot(t, samples, color=INK, linewidth=0.6)
+
+            wrong = read != sent
+            ax.text((start + end) / 2 * ms_per_sample, high + pad * 1.2,
+                    f"sent {sent}, read {read}" + ("  ✗" if wrong else ""),
+                    ha="center", va="bottom", fontsize=9,
+                    color=BAD_MARK if wrong else INK_SECONDARY, weight="bold" if wrong else "normal")
+            start = end
+
+        ax.set_xlim(0, start * ms_per_sample)
+        ax.set_ylim(low - pad, high + pad * 3.5)
 
     def _draw_strip(self) -> None:
         if not self.strip:
@@ -401,16 +544,23 @@ def main():
         rows = {i: row for i, row in enumerate(csv.DictReader(file))}
 
     layout = map_layout(
-        (row["block"], row["index"], len(row["sent"]))
-        for row in rows.values() if row["block"] != "codes"
+        (row["block"], row["index"], row["code"], len(row["sent"]), len(row["message"]))
+        for row in rows.values() if shown(row["block"], row["seed"])
     )
 
+    raw_dir = path.parent / f"{path.stem}_raw"
+    has_raw = any(row.get("raw_file") for row in rows.values())
+    first = next(iter(rows.values()), {})
+
     events = queue.Queue()
-    for event in saved_events(rows):
+    if has_raw:
+        settings = np.load(raw_dir.parent / next(r["raw_file"] for r in rows.values() if r.get("raw_file")))
+        events.put(("config", int(first["settle_ms"]), int(first["window_ms"]), int(settings["sample_rate"])))
+    for event in saved_events(rows, raw_dir):
         events.put(event)
     events.put(("done", "Saved run"))
 
-    view = LiveView(events, path.stem, layout, save_path=path.with_suffix(".png"))
+    view = LiveView(events, path.stem, layout, save_path=path.with_suffix(".png"), raw=has_raw)
     view.update()
     print("Saved", path.with_suffix(".png"))
     plt.show()

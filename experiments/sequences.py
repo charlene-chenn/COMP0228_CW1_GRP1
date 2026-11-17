@@ -45,3 +45,17 @@ def random_message(seed: int, length: int = 32) -> List[int]:
     """
     rng = random.Random(seed)
     return [rng.randint(0, 1) for _ in range(length)]
+
+
+def shown(block: str, seed: str) -> bool:
+    """
+    Whether the live viewer draws a string. Every PRBS string is drawn. Coded
+    strings are drawn only with --prbs-per-code (seed "prbs5"), since a full case
+    of random messages would be too many rows.
+    """
+    return block != "codes" or seed == "prbs5"
+
+
+def map_key(block: str, length: int):
+    """Which error map a string goes in: coded strings share one, PRBS strings go by length."""
+    return "channel" if block == "codes" else ("prbs", length)

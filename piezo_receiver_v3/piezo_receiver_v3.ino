@@ -7,12 +7,23 @@
 //
 // Serial commands (USB, each ending in a newline):
 //   B<bits>  send a bit string, e.g. B10110010
-//            replies with "<detected>,<vibration>" per bit, then DONE
+//            replies with "<detected>,<vibration>" per bit, then "Late: <n>", then DONE
+//   R1 / R0  turn raw sample streaming on / off (off at start), then DONE
 //   S<ms>    set the settle time, then DONE
 //   W<ms>    set the measuring window and recalibrate, then DONE
 //   C        recalibrate the threshold, then DONE
 //   ?        print the threshold, then READY
 // Bad commands reply with a line starting with ERR.
+//
+// With raw streaming on, each bit's "<detected>,<vibration>" line comes straight
+// after "R<count>,<offset>" and then <count> samples as raw binary (uint16,
+// little-endian, 2 bytes each). These are every sample in the buffers read for
+// that bit, so consecutive bits join up into one continuous recording unless a
+// catch-up happened. <offset> is how many samples into the bit's first buffer
+// the motor was switched (it counts the time spent printing the previous bit).
+// "Late: <n>" counts the bits after which printing ran into the next buffer, so
+// the board had to skip ahead. Those bits ran longer than usual, and the raw
+// recording has a gap after them.
 // Vibration and threshold are 16-bit ADC counts (65535 = 3.3 V).
 // The motor turns off if the PC closes the port.
 //
@@ -39,6 +50,13 @@ const uint32_t ADC_WARMUP_MS = 200;   // ignored after starting the ADC
 const unsigned long CALIBRATION_MS = 3000;
 unsigned long settleMs = 100;   // wait for the motor to spin up or down
 unsigned long windowMs = 100;   // measure the piezo for this long
+
+// Raw streaming. 16384 samples covers bits up to 1.6 s long, longer bits are cut short.
+const size_t MAX_RAW_SAMPLES = 16384;
+uint16_t rawSamples[MAX_RAW_SAMPLES];
+size_t rawCount = 0;
+bool rawMode = false;
+const long BUFFER_US = (long)N_SAMPLES * 1000000L / SAMPLE_RATE;  // 25600 us
 
 // Noise detection
 const int NOISE_MARGIN = 3000;  // 16-bit counts, about 150 mV (set for the big piezo)
@@ -71,16 +89,31 @@ void syncToBuffer() {
   buffer.release();
 }
 
-// Skip some samples, then measure peak-to-peak vibration over the next ones
-int measureVibration(uint32_t skipSamples, uint32_t windowSamples) {
+// Skip some samples, then measure peak-to-peak vibration over the next ones.
+// If keepRaw is set, every sample of every buffer read is copied to rawSamples,
+// and firstBufferDone is set to when the first buffer finished (micros).
+int measureVibration(uint32_t skipSamples, uint32_t windowSamples,
+                     bool keepRaw = false, unsigned long *firstBufferDone = nullptr) {
 
   int minValue = 65535;
   int maxValue = 0;
+  bool first = true;
+
+  if (keepRaw) rawCount = 0;
 
   while (windowSamples > 0) {
 
     SampleBuffer buffer = adc.read();   // waits for the next one
     size_t count = buffer.size();
+
+    if (first && firstBufferDone != nullptr) *firstBufferDone = micros();
+    first = false;
+
+    if (keepRaw) {
+      for (size_t i = 0; i < count && rawCount < MAX_RAW_SAMPLES; i++) {
+        rawSamples[rawCount++] = buffer[i];
+      }
+    }
 
     for (size_t i = 0; i < count && windowSamples > 0; i++) {
 
@@ -148,6 +181,7 @@ void sendBits(const String &bits) {
   }
 
   syncToBuffer();
+  int late = 0;
 
   for (unsigned int i = 0; i < bits.length(); i++) {
 
@@ -158,9 +192,22 @@ void sendBits(const String &bits) {
     }
 
     digitalWrite(MOTOR_PIN, bits[i] == '1' ? HIGH : LOW);
+    unsigned long switchedAt = micros();
+    unsigned long firstBufferDone = switchedAt;
 
-    int vibration = measureVibration(settleMs * SAMPLES_PER_MS, windowMs * SAMPLES_PER_MS);
+    int vibration = measureVibration(settleMs * SAMPLES_PER_MS, windowMs * SAMPLES_PER_MS,
+                                     rawMode, &firstBufferDone);
     int detected = (vibration >= threshold) ? 1 : 0;
+
+    if (rawMode) {
+      // The first buffer started BUFFER_US before it finished
+      long offsetUs = (long)(switchedAt - firstBufferDone) + BUFFER_US;
+      Serial.print("R");
+      Serial.print(rawCount);
+      Serial.print(",");
+      Serial.println(offsetUs * (long)SAMPLE_RATE / 1000000L);
+      Serial.write((const uint8_t *)rawSamples, rawCount * sizeof(uint16_t));
+    }
 
     Serial.print(detected);
     Serial.print(",");
@@ -170,10 +217,13 @@ void sendBits(const String &bits) {
     // the queue has older samples in it, so catch up before the next bit.
     if (adc.available()) {
       syncToBuffer();
+      late++;
     }
   }
 
   digitalWrite(MOTOR_PIN, LOW);
+  Serial.print("Late: ");
+  Serial.println(late);
   Serial.println("DONE");
 }
 
@@ -205,6 +255,14 @@ void handleCommand(const String &command) {
     windowMs = value;
     // A longer window sees larger peaks, so the old threshold no longer applies
     calibrate();
+    Serial.println("DONE");
+
+  } else if (type == 'R') {
+    if (argument != "0" && argument != "1") {
+      Serial.println("ERR use R1 or R0");
+      return;
+    }
+    rawMode = (argument == "1");
     Serial.println("DONE");
 
   } else if (type == 'C') {

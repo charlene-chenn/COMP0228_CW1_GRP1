@@ -5,19 +5,24 @@ Test the link from the project folder (close the Arduino Serial Monitor first):
     python3 -m channel.hardware                  # lists the available ports
     python3 -m channel.hardware /dev/cu.usbmodemXXXX
 """
+import re
 import sys
 import time
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
+import numpy as np
 import serial
 from serial.tools import list_ports
 
-MAX_BITS = 1000    # Must match MAX_LINE in piezo_receiver_v3.ino
-BOOT_WAIT_S = 6.0  # Long enough for a board reset and its 3 s calibration
+MAX_BITS = 1000       # Must match MAX_LINE in piezo_receiver_v3.ino
+SAMPLE_RATE = 10000   # Hz, must match SAMPLE_RATE in piezo_receiver_v3.ino
+BOOT_WAIT_S = 6.0     # Long enough for a board reset and its 3 s calibration
+RAW_HEADER = re.compile(r"R(\d+),(-?\d+)")
 
 
 class ArduinoLink:
-    def __init__(self, port: str, baudrate: int = 115200, timeout: float = 5.0):
+    def __init__(self, port: str, baudrate: int = 115200, timeout: float = 5.0,
+                 raw: bool = False):
         """
         Connect to the Arduino and wait for it to finish calibrating.
 
@@ -26,19 +31,41 @@ class ArduinoLink:
             baudrate (int, optional): must match the sketch. Defaults to 115200.
             timeout (float, optional): longest wait for a reply line in seconds.
                 Must be longer than one bit takes. Defaults to 5.0.
+            raw (bool, optional): also record the raw piezo samples for every bit.
+                They are kept in last_raw after each send_and_receive. Defaults to False.
         """
         self.threshold = None
+        self.raw = raw
+        self.sample_rate = SAMPLE_RATE
+        self.last_raw: Optional[List[np.ndarray]] = None  # Samples for each bit
+        self.last_offsets: Optional[List[int]] = None     # Motor switch, samples into each bit
+        self.last_late: Optional[int] = None              # Bits that ran long
+        self._pending_raw = None
         self.ser = serial.Serial(port, baudrate, timeout=timeout)
         self._wait_until_ready()
+        try:
+            self._command("R1" if raw else "R0")
+        except RuntimeError:
+            if raw:
+                raise RuntimeError(
+                    "The sketch doesn't know the R command. Upload the current "
+                    "piezo_receiver_v3.ino to record raw samples."
+                ) from None
+            # An older sketch, which never streams raw samples anyway
 
     def send_and_receive(self, bits, on_bit=None) -> Tuple[List[int], List[int]]:
         """
         Transmit bits through the motor and return what the piezo detected.
 
+        With raw recording on, the samples for each bit are left in last_raw, with
+        the motor switch positions in last_offsets and the number of late bits in
+        last_late.
+
         Args:
             bits (List[int]): bits to send, as ints 0 or 1.
-            on_bit (Callable, optional): called as on_bit(index, detected, vibration)
-                as each bit's reply arrives, for live viewing. Defaults to None.
+            on_bit (Callable, optional): called as on_bit(index, detected, vibration, raw)
+                as each bit's reply arrives, for live viewing. raw is that bit's
+                samples, or None if raw recording is off. Defaults to None.
 
         Returns:
             Tuple[List[int], List[int]]: the detected bit and the raw
@@ -51,13 +78,20 @@ class ArduinoLink:
         if len(text) > MAX_BITS:
             raise ValueError(f"Can't send {len(text)} bits at once (limit {MAX_BITS})")
         if not text:
+            self.last_raw, self.last_offsets, self.last_late = [], [], 0
             return [], []
 
+        self.last_raw = [] if self.raw else None
+        self.last_offsets = [] if self.raw else None
+        self.last_late = None
         rows = [line.split(",") for line in self._command("B" + text, on_bit)]
 
         # A missing reply would shift every later bit, so never let it through
         if len(rows) != len(text):
             raise RuntimeError(f"Sent {len(text)} bits but got {len(rows)} readings")
+
+        if self.raw and len(self.last_raw) != len(text):
+            raise RuntimeError(f"Sent {len(text)} bits but got raw samples for {len(self.last_raw)}")
 
         received = [int(row[0]) for row in rows]
         vibration = [int(row[1]) for row in rows]
@@ -109,12 +143,33 @@ class ArduinoLink:
                 return replies
             if line.startswith("ERR"):
                 raise RuntimeError(f"Arduino replied: {line}")
+            if line.startswith("Late:"):
+                self.last_late = int(line.split(":")[1])
+                continue
+            header = RAW_HEADER.fullmatch(line)
+            if header:
+                self._read_raw(int(header[1]), int(header[2]))
+                continue
             # Calibration messages aren't data
             if not line.startswith(("Calibrating", "Keep", "Noise", "Threshold")):
                 replies.append(line)
+                raw = None
+                if self._pending_raw is not None:
+                    raw, offset = self._pending_raw
+                    self._pending_raw = None
+                    if self.last_raw is not None:
+                        self.last_raw.append(raw)
+                        self.last_offsets.append(offset)
                 if on_bit is not None:
                     detected, vibration = line.split(",")
-                    on_bit(len(replies) - 1, int(detected), int(vibration))
+                    on_bit(len(replies) - 1, int(detected), int(vibration), raw)
+
+    def _read_raw(self, count: int, offset: int) -> None:
+        """Read one bit's raw samples, sent as binary straight after their header."""
+        data = self.ser.read(2 * count)
+        if len(data) != 2 * count:
+            raise TimeoutError(f"Expected {count} raw samples but the Arduino stopped sending")
+        self._pending_raw = (np.frombuffer(data, dtype="<u2").copy(), offset)
 
     def _read_line(self) -> str:
         raw = self.ser.readline()
@@ -152,6 +207,22 @@ def main():
         print("Received: ", received)
         print("Vibration:", vibration)
         print("Wrong:    ", sum(a != b for a, b in zip(sent, received)))
+
+        # Same bits again with raw recording, to check the streaming works
+        try:
+            link._command("R1")
+        except RuntimeError:
+            print("Raw:       not supported, upload the current piezo_receiver_v3.ino")
+            return
+        link.raw = True
+        received_raw, vibration_raw = link.send_and_receive(sent)
+        link._command("R0")
+        link.raw = False
+
+        print("Raw:       ", [len(r) for r in link.last_raw], "samples per bit")
+        print("Switch at: ", link.last_offsets, "samples into each bit")
+        print("Late bits: ", link.last_late)
+        print("Vibration: ", vibration_raw, "(with raw on)")
 
 
 if __name__ == "__main__":

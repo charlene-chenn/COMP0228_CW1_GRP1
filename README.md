@@ -48,4 +48,8 @@ python3 -m experiments.summarise
 python3 -m experiments.live_view experiments/results/<case>.csv
 ```
 
+The full list of commands for the experiment suite is in `experiment.md`. Use `--prbs-per-code` to send one PRBS-5 string through every code and nothing else; the `none` code is then the uncoded baseline.
+
+The raw piezo samples (10 kHz) for every string are saved in `experiments/results/<case>_raw/`, one `.npz` per string. `save_raw` in `experiments/run_case.py` describes what each file holds. Add `--no-raw` to skip them. With `--live`, the viewer also shows the raw signal for the latest bits.
+
 A full case at 50/50 takes about 14.6 minutes. Use `--codes none R3 R5` to run only some codes, or `--message-bits 64` for longer messages. Add `--run 2` when repeating a case, for example after re-mounting the piezo. Closing the viewer stops the case after the current string. Use `--sim` in place of `<port>` to try all of this with no hardware; those results go in `experiments/results/sim/`, which git ignores.

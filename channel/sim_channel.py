@@ -3,6 +3,8 @@ import random
 import time
 from typing import List, Optional, Tuple
 
+import numpy as np
+
 
 def flip_one_bit(bits, position: Optional[int] = None) -> List[int]:
     """
@@ -38,14 +40,30 @@ class SimulatedLink:
     BURST_CHANCE = 0.004
     BURST_STOP_CHANCE = 0.3
 
-    def __init__(self, bit_s: float = 0.0, seed: int = 1):
+    # Made-up raw signal, only there so raw recording can be tried without hardware
+    SAMPLE_RATE = 10000
+    BUFFER_SAMPLES = 256
+    RAW_MIDDLE = 32768
+    MOTOR_HZ = 180
+    RAW_NOISE = 300
+    OFFSET_SAMPLES = 20
+
+    def __init__(self, bit_s: float = 0.0, seed: int = 1, raw: bool = False):
         """
         Args:
             bit_s (float, optional): time to wait per bit. Defaults to 0.0.
             seed (int, optional): seed for the noise. Defaults to 1.
+            raw (bool, optional): also make up raw samples for each bit, like
+                ArduinoLink(raw=True). Defaults to False.
         """
         self.bit_s = bit_s
         self.rng = random.Random(seed)
+        self.np_rng = np.random.default_rng(seed)
+        self.raw = raw
+        self.sample_rate = self.SAMPLE_RATE
+        self.last_raw = None
+        self.last_offsets = None
+        self.last_late = None
         self.settle_ms = 100
         self.window_ms = 100
         self.threshold = 0
@@ -74,7 +92,11 @@ class SimulatedLink:
         """Same as ArduinoLink.send_and_receive, through a simulated motor and piezo."""
         received, vibration = [], []
         previous = 0
+        previous_level = 0.0
         in_burst = False
+        self.last_raw = [] if self.raw else None
+        self.last_offsets = [] if self.raw else None
+        self.last_late = 0
 
         for index, bit in enumerate(bits):
             in_burst = (
@@ -96,8 +118,27 @@ class SimulatedLink:
             vibration.append(value)
             previous = bit
 
+            samples = None
+            if self.raw:
+                samples = self._raw_bit(previous_level, value)
+                self.last_raw.append(samples)
+                self.last_offsets.append(self.OFFSET_SAMPLES)
+            previous_level = value
+
             if on_bit is not None:
-                on_bit(index, detected, value)
+                on_bit(index, detected, value, samples)
             time.sleep(self.bit_s)
 
         return received, vibration
+
+    def _raw_bit(self, start_level: float, end_level: float) -> np.ndarray:
+        """A sine at the motor speed whose peak-to-peak moves from one level to the next."""
+        wanted = (self.settle_ms + self.window_ms) * self.SAMPLE_RATE // 1000
+        count = -(-wanted // self.BUFFER_SAMPLES) * self.BUFFER_SAMPLES
+        t = np.arange(count) / self.SAMPLE_RATE
+        settle = self.settle_ms * self.SAMPLE_RATE // 1000
+        ramp = np.clip((np.arange(count) - self.OFFSET_SAMPLES) / max(settle, 1), 0, 1)
+        level = start_level + (end_level - start_level) * ramp
+        wave = self.RAW_MIDDLE + level / 2 * np.sin(2 * np.pi * self.MOTOR_HZ * t)
+        wave += self.np_rng.normal(0, self.RAW_NOISE, count)
+        return np.clip(wave, 0, 65535).astype(np.uint16)
