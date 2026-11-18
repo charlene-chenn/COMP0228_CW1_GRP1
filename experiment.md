@@ -281,6 +281,62 @@ ls experiments/results/*_Pprbs5_run*/*.csv | wc -l
 
 The earlier trial results are in `archive/trial_results/` and pilots go in `archive/pilot/`, so `experiments/results/` only holds this suite. Running `python3 -m experiments.summarise` with no file names summarises all of it.
 
+## Findings so far (18 Nov 2026)
+
+From the raw signal of the 150/50 runs recorded on 17 Nov: wood 15, 30 and 50 cm, PCB 15 cm and acrylic 15 cm, each runs 1–3.
+
+### The leakage is the motor spinning down
+
+After the motor is switched off, the vibration's main frequency falls steadily from the drive frequency to about 25 Hz over about 300 ms. A vibration motor's frequency is its rotation speed, so this is the rotor coasting to a stop. The specimen ringing would stay at one frequency. Median over every 1→0→0 in the runs, in 40 ms slices after switch-off:
+
+| ms after motor off | 20 | 60 | 100 | 140 | 180 | 220 | 260 | 300 | 340 | 380 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| **wood**, frequency (Hz) | 106 | 81 | 68 | 64 | 54 | 36 | 27 | 25 | 25 | 24 |
+| wood, peak-to-peak | 63.6k | 28.0k | 19.1k | 13.6k | 6.6k | 6.0k | 4.2k | 2.8k | 2.1k | 1.6k |
+| **acrylic**, frequency (Hz) | 119 | 76 | 67 | 59 | 49 | 42 | 37 | 29 | 26 | 25 |
+| acrylic, peak-to-peak | 64.4k | 21.0k | 12.4k | 10.6k | 9.8k | 11.6k | 17.4k | 11.8k | 8.3k | 6.5k |
+| **PCB**, frequency (Hz) | 108 | 92 | 67 | 54 | 46 | 37 | 30 | 26 | 25 | 26 |
+| PCB, peak-to-peak | 13.7k | **53.9k** | **48.8k** | 8.3k | 10.8k | 12.4k | 8.6k | 5.2k | 4.2k | 2.9k |
+
+(n = 356 for wood, 108 for acrylic and 108 for PCB. The acrylic row includes runs 2 and 3, whose electrical spikes are single samples and barely move these medians.)
+
+- While the motor is driven, the main frequency is about 113–123 Hz. In the measuring window, 150–200 ms after a switch-off, the motor is down to about 50–60 Hz. That difference is what a frequency-based detector can use.
+- **PCB resonates.** As the motor slows through about 70–90 Hz, it hits the board's resonance, and the signal gets *bigger* 60–100 ms after switch-off. So on PCB a 0 after a 1 reads as large as a 1: median peak-to-peak 10.8k against 10.2k for 1s. No amplitude threshold can separate them.
+- **Acrylic has a second bump** at about 220–300 ms, where the signal grows again to about 17k. It's probably a lower resonance of the acrylic. It falls in the next bit, so a 0 two bits after a 1 can also be affected.
+- **Wood decays smoothly**, with no resonance in the range the motor sweeps through.
+
+### Which raw-signal measures separate a 1 from a 0 after a 1
+
+Errors at the best single threshold for each measure (wood 2,507 bits, acrylic 759, PCB 759). The threshold was chosen on the same data, so these are optimistic: for the report, choose it on run 1 and test on runs 2–3.
+
+| Measure, in the 50 ms window | wood | acrylic | PCB |
+|---|---|---|---|
+| Peak-to-peak (the current receiver) | 11 | 0 | **148** |
+| Main frequency | 33 | 42 | **1** |
+| Size in the last 50 ms of the bit ÷ size in the first 50 ms | **2** | **0** | 129 |
+
+Frequency fixes PCB, and the decay trend fixes wood and acrylic, so the two together should work on all three. These are the basis of the DSP extension.
+
+### PCB's higher noise floor is mains pickup
+
+With the motor off for at least two bits, PCB's quiet peak-to-peak is about 720, against about 370 for wood and 330 for acrylic. Its main frequency is a steady 50 Hz (48–50 Hz), the UK mains frequency, while wood and acrylic show a mixture of low frequencies. The copper on the PCB most likely picks up mains hum like an antenna and couples it into the piezo; wood and acrylic are insulators. Connecting the copper to the Giga's GND should confirm it, if the noise floor drops. It only raises PCB's threshold by about 700 (4,100 against 3,400), which barely changes its errors.
+
+### Electrical noise from the motor supply (acrylic runs 2 and 3)
+
+Acrylic runs 2 and 3 (20:40, 17 Nov) caught one-sample electrical spikes of 7,000–20,000 counts from the motor supply. They are kept in `experiments/results/electrical-noise/` and are not part of the suite. One spike landed in calibration, so the thresholds were 9,616 and 12,686. Re-reading every run at one shared threshold from the saved vibration values:
+
+| Run | Own threshold | Errors | At 3,400 | At 4,100 |
+|---|---|---|---|---|
+| acrylic run 1 | 3,368 | 14.5% | 14.5% | 13.7% |
+| acrylic run 2 (noisy) | 9,616 | 12.2% | 24.9% | 24.4% |
+| acrylic run 3 (noisy) | 12,686 | 8.0% | 24.9% | 24.7% |
+| PCB runs 1–3 | 4,055–4,108 | 13.7–17.5% | 16.5–20.0% | 13.7–17.5% |
+| wood, all 9 runs | 3,421–3,503 | 13.5% | 13.5% | 13.5% |
+
+- At a shared threshold, every run has the same 54 leakage errors (a 0 straight after a 1), so the leakage behaves the same on all three materials at 150/50. Anything beyond 54 comes from something else: the spikes in acrylic runs 2 and 3, and the resonance in PCB.
+- Their high thresholds hid most of the leakage, which made those runs look better than run 1. At a shared threshold the spikes get through, and they look about twice as bad. Neither version describes acrylic, so they need re-running once the supply noise is fixed.
+- Peak-to-peak is very sensitive to a single spike. In the noisy runs, the largest quiet reading was 19,800–20,700 by peak-to-peak, but only 2,800–3,100 after a 3-sample median filter and 1,000–1,200 by RMS. RMS or band energy would make the receiver resistant to this kind of noise.
+
 ## Notes for the report
 
 - **Distance is mixed up with geometry.** The 20 cm baseline uses the 30 × 6 specimen, but 30 cm and 50 cm use the extended one. If there's time, run extended wood at 20 cm as a control. Using `wood-ext` keeps it from overwriting the baseline:
