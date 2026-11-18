@@ -397,6 +397,7 @@ def main():
     ap.add_argument("--bit-ms", type=float, default=100, help="settle + window per bit")
     ap.add_argument("--settle-ms", type=float, default=None, help="ignored at the start of each bit")
     ap.add_argument("--bits", default="1011001110001011010011100101", help="bits sent (synthetic) or expected (file)")
+    ap.add_argument("--npz", help="raw capture from experiments (samples, sent, bit_start...): real hardware data")
     ap.add_argument("--csv", help="trial CSV: replay the bits it sent (synthetic signal), and print what the hardware received")
     ap.add_argument("--row", type=int, default=0, help="row of --csv to use")
     ap.add_argument("--max-bits", type=int, default=60, help="bits of the CSV string to replay")
@@ -442,7 +443,18 @@ def main():
             args.settle_ms = float(row["settle_ms"])
         args.tau_ms = 40.0 if args.tau_ms == 15.0 else args.tau_ms
 
-    if args.file:
+    if args.npz:
+        d = np.load(args.npz)
+        x = d["samples"].astype(float)
+        args.fs = float(d["sample_rate"])
+        sent = [int(b) for b in d["sent"]]
+        hw_received = "".join(str(int(b)) for b in d["received"])
+        args.start = int(d["bit_start"][0])
+        args.bit_ms = (int(d["bit_start"][1]) - int(d["bit_start"][0])) * 1000 / args.fs
+        if args.settle_ms is None:
+            args.settle_ms = float(d["settle_ms"])
+        n_bits = len(sent)
+    elif args.file:
         x = np.load(args.file).astype(float)
         n_bits = len(sent) if sent else (args.n_bits or int((len(x) - args.start) / (args.bit_ms * args.fs / 1000)))
         sent = sent if (sent and len(sent) == n_bits) else None
