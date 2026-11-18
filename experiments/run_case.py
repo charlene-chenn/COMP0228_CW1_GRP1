@@ -24,6 +24,18 @@ same folder (see experiments/make_video.py). Use --no-video to skip it.
 
 Re-run the same command to carry on after a stop. Finished strings are skipped.
 Use --prbs-only for a quick look at a setting, and --sim to try this with no hardware.
+
+Receiver extensions (experiments/extensions.py) decide the bits again from the
+raw samples, and save their results to <case>_<extension>.csv:
+    --extension filter              also run the filtering extension during the case
+    --replay --extension filter     only run the extension, on every saved case
+    --replay <case>.csv ... --extension filter     only on these cases
+--replay sends nothing and needs no port, material or distance. With --live, each
+extension gets its own window too, updated as each string finishes.
+
+The filter's pass band is set once for each material, from its run 1, and saved in
+experiments/filter_bands.json. Every run of that material uses it from then on:
+    --set-band <run 1>.csv ...      set the band for each run's material
 """
 import argparse
 import csv
@@ -42,6 +54,7 @@ import numpy as np
 
 from channel.sim_channel import SimulatedLink
 from codes import CODES
+from experiments import extensions
 from experiments.sequences import map_key, prbs, random_message, shown
 from experiments.summarise import print_summary
 
@@ -242,7 +255,8 @@ def countdown(seconds: int, events) -> None:
 
 def run_case(link, args, case: str, path: Path, fixed: dict,
              events: Optional[queue.Queue] = None,
-             stop: Optional[threading.Event] = None) -> bool:
+             stop: Optional[threading.Event] = None,
+             ext_events: Optional[Dict[str, queue.Queue]] = None) -> bool:
     """
     Send every string in the case that isn't already saved.
 
@@ -254,6 +268,7 @@ def run_case(link, args, case: str, path: Path, fixed: dict,
         fixed (dict): the columns that are the same for every string in the case.
         events (queue.Queue, optional): where to send updates for the live viewer.
         stop (threading.Event, optional): set to stop after the current string.
+        ext_events (dict, optional): a queue for each extension's live window.
 
     Returns:
         bool: True if the whole case has now been sent.
@@ -327,8 +342,93 @@ def run_case(link, args, case: str, path: Path, fixed: dict,
                 f"channel errors {result['channel_errors']}/{result['channel_bits']}, "
                 f"message errors {result['info_errors']}/{result['info_bits']}"
             )
+            print_extensions(link, args, trial, result, ext_events)
 
     return True
+
+
+def extension_options(args) -> dict:
+    """The filtering extension's settings from the command line."""
+    options = {
+        "kind": args.filter_kind, "smooth_hz": args.filter_smooth,
+        "notch_hz": args.filter_notch, "sharpen_tau_ms": args.filter_sharpen,
+    }
+    if args.filter_band == ["material"]:
+        options["band_from_material"] = True
+    elif args.filter_band == ["auto"]:
+        options["auto_band"] = True
+    else:
+        options["lo"], options["hi"] = (float(value) for value in args.filter_band)
+    return options
+
+
+def print_extensions(link, args, trial: Trial, result: dict,
+                     ext_events: Optional[Dict[str, queue.Queue]] = None) -> None:
+    """
+    Under each string's line, how every extension did on the same string. With
+    --live, also send the extension's decisions to its own window.
+    """
+    for name in args.extension:
+        sent = [int(bit) for bit in result["sent"]]
+        outcome = extensions.string_result(link, trial.code, sent, trial.message,
+                                           name, extension_options(args), args.material)
+        if outcome is None:
+            print(f"{'':>8}{name}: no usable raw samples")
+            continue
+        print(f"{'':>8}{name + ':':<31}channel errors {outcome['channel_errors']}/"
+              f"{result['channel_bits']}, message errors {outcome['info_errors']}/"
+              f"{result['info_bits']}")
+
+        view = (ext_events or {}).get(name)
+        if view is None or not shown(trial.block, trial.seed):
+            continue
+        row = (trial.block, trial.index, trial.code)
+        view.put(("trial", map_key(trial.block, len(sent)), row, sent, round(outcome["threshold"])))
+        for i, (bit, level) in enumerate(zip(outcome["received"], outcome["levels"])):
+            view.put(("bit", i, int(bit), round(level), None))
+        if trial.block == "codes":
+            view.put(("decoded", row, trial.message, outcome["decoded"]))
+
+
+def check_bands(args) -> None:
+    """Stop before sending anything if the filter has no band for this material."""
+    if "filter" in args.extension and args.filter_band == ["material"]:
+        try:
+            extensions.material_band(args.material)
+        except KeyError as error:
+            raise SystemExit(f"Can't use --extension filter: {error.args[0]}") from None
+
+
+def save_extensions(args, path: Path) -> List[Path]:
+    """
+    Write <case>_<extension>.csv for each extension, from everything saved so far,
+    and its picture <case>_<extension>.png (the same view as the case's own).
+    """
+    from experiments.live_view import view_saved
+
+    written = []
+    for name in args.extension:
+        out = extensions.replay(path, name, extension_options(args))
+        if out is not None:
+            written.append(out)
+            print("Saved", view_saved(out, show=False))
+    return written
+
+
+def replay_main(args) -> None:
+    """--replay: run the extensions on saved cases, without sending anything."""
+    paths = [Path(p) for p in args.replay] or extensions.saved_cases()
+    if not paths:
+        print("No saved cases.")
+        return
+    written = []
+    for path in paths:
+        if not extensions.is_case_csv(path):
+            print(f"Skipping {path}: give the case's own CSV, not an extension's results")
+            continue
+        written += save_extensions(args, path)
+    if written:
+        print_summary(written)
 
 
 def check_header(path: Path) -> None:
@@ -346,9 +446,10 @@ def check_header(path: Path) -> None:
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Run one test case through every code.")
-    parser.add_argument("port", nargs="?", help="serial port (not needed with --sim)")
-    parser.add_argument("--material", required=True, help="surface, e.g. wood")
-    parser.add_argument("--distance", required=True, type=float, help="motor to piezo, in cm")
+    parser.add_argument("port", nargs="?", help="serial port (not needed with --sim or --replay)")
+    parser.add_argument("--material", help="surface, e.g. wood (required unless --replay)")
+    parser.add_argument("--distance", type=float,
+                        help="motor to piezo, in cm (required unless --replay)")
     parser.add_argument("--noise", default="none", help="physical noise source, e.g. fan")
     parser.add_argument("--settle", type=int, default=100, help="settle time in ms")
     parser.add_argument("--window", type=int, default=100, help="measuring window in ms")
@@ -370,7 +471,46 @@ def parse_args():
                         help="don't make a video of the raw signal when the case finishes")
     parser.add_argument("--sim", action="store_true", help="use a simulated channel")
 
+    ext = parser.add_argument_group("receiver extensions (see experiments/extensions.py)")
+    ext.add_argument("--extension", nargs="+", default=[], choices=list(extensions.EXTENSIONS),
+                     help="also decide the bits with these extensions, from the raw samples")
+    ext.add_argument("--replay", nargs="*", metavar="CSV",
+                     help="send nothing: only run --extension on these saved case CSVs "
+                          "(every saved case if none are given)")
+    ext.add_argument("--set-band", nargs="+", metavar="CSV",
+                     help="send nothing: set the filter's band for each run's material from "
+                          "that run (give each material's run 1), saved in "
+                          "experiments/filter_bands.json")
+    ext.add_argument("--filter-band", nargs="+", default=["material"], metavar="HZ",
+                     help="filter pass band: 'material' (default) uses the band saved for the "
+                          "run's material (see --set-band); 'auto' finds the motor's peak in "
+                          "each string by itself; or give LO HI in Hz")
+    ext.add_argument("--filter-kind", default="butter", choices=["butter", "bessel", "cheby1"],
+                     help="filter type (default butter)")
+    ext.add_argument("--filter-smooth", type=float, default=30.0, metavar="HZ",
+                     help="envelope low-pass (default 30)")
+    ext.add_argument("--filter-notch", type=float, metavar="HZ", help="extra notch, e.g. 50")
+    ext.add_argument("--filter-sharpen", type=float, metavar="TAU_MS",
+                     help="undo the motor's spin-down with this time constant, e.g. 40")
+
     args = parser.parse_args()
+    if args.filter_band not in (["material"], ["auto"]):
+        try:
+            lo, hi = (float(value) for value in args.filter_band)
+        except ValueError:
+            parser.error("--filter-band takes 'material', 'auto', or LO HI in Hz")
+        if not 0 < lo < hi:
+            parser.error("--filter-band needs 0 < LO < HI")
+    if args.set_band is not None:
+        return args
+    if args.replay is not None:
+        if not args.extension:
+            parser.error("--replay needs --extension, e.g. --extension filter")
+        return args
+    if args.material is None or args.distance is None:
+        parser.error("--material and --distance are required (unless --replay)")
+    if args.extension and args.no_raw:
+        parser.error("--extension needs the raw samples, so it can't be used with --no-raw")
     if not args.sim and not args.port:
         parser.error("give a serial port, or --sim")
     if args.prbs_per_code and args.prbs_only:
@@ -394,6 +534,16 @@ def finish(args, path: Path) -> None:
 
 def main():
     args = parse_args()
+    if args.set_band is not None:
+        for csv_path in args.set_band:
+            band = extensions.set_band(Path(csv_path))
+            print(f"{Path(csv_path).stem}: drive frequency {band['drive_hz']:.1f} Hz, "
+                  f"band {band['lo']:.1f}-{band['hi']:.1f} Hz saved for every run of this material")
+        return
+    if args.replay is not None:
+        replay_main(args)
+        return
+    check_bands(args)
     source = "sim" if args.sim else "hardware"
     case = case_name(args, source)
 
@@ -422,7 +572,7 @@ def main():
         print("Connecting (up to about 10 s), keep the surface still...")
         with connect() as link:
             finished = run_case(link, args, case, path, fixed)
-        print_summary([path])
+        print_summary([path, *save_extensions(args, path)])
         if finished:
             finish(args, path)
         return
@@ -443,18 +593,38 @@ def main():
     for event in saved_events(load_done(path), path.parent / "raw"):
         events.put(event)
 
+    # A window for each extension, showing its decisions as each string finishes.
+    # Strings saved before a resume come from its results file, if there is one.
+    ext_events = {name: queue.Queue() for name in args.extension}
+    ext_views = []
+    for name, ext_queue in ext_events.items():
+        ext_path = extensions.extension_path(path, name)
+        if ext_path.exists():
+            for event in saved_events(load_done(ext_path)):
+                ext_queue.put(event)
+        ext_views.append(LiveView(
+            ext_queue, f"{case}_{name}", layout,
+            level_label="Filtered level (ADC counts)" if name == "filter" else f"{name} level",
+            window_title=f"{name} extension live view",
+        ))
+
     def work():
         try:
             events.put(("status", "Connecting and calibrating, keep the surface still"))
             with connect() as link:
-                outcome["finished"] = run_case(link, args, case, path, fixed, events, stop)
-            events.put(("done", "Finished" if outcome["finished"] else "Stopped"))
+                outcome["finished"] = run_case(link, args, case, path, fixed, events, stop,
+                                               ext_events)
+            message = "Finished" if outcome["finished"] else "Stopped"
         except Exception as error:
             outcome["error"] = error
-            events.put(("done", f"Failed: {error}"))
+            message = f"Failed: {error}"
+        for ext_queue in [events, *ext_events.values()]:
+            ext_queue.put(("done", message))
 
     worker = threading.Thread(target=work, daemon=True)
     view = LiveView(events, case, layout, stop, path.with_suffix(".png"), raw=not args.no_raw)
+    for ext_view in ext_views:
+        ext_view.start()
     worker.start()
     view.show()
 
@@ -466,7 +636,7 @@ def main():
     if not outcome["finished"]:
         print("Stopped early. Run the same command again to carry on.")
     if path.exists():
-        print_summary([path])
+        print_summary([path, *save_extensions(args, path)])
     if outcome["finished"]:
         finish(args, path)
 

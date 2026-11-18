@@ -273,10 +273,24 @@ Distance:
 python3 -m experiments.summarise experiments/results/wood_20cm_none_*_Pprbs5_*/*.csv experiments/results/wood_30cm_*_Pprbs5_*/*.csv experiments/results/wood_50cm_*_Pprbs5_*/*.csv
 ```
 
-Check that all 24 files exist (should print 24):
+Filtering extension: decide every saved run's bits again with the filter, from the raw samples. Nothing is sent and no port is needed. The band is the one saved for each run's material in `experiments/filter_bands.json`, set from that material's run 1 (method in `extensions.md`), and each run gets `<case>_filter.csv` and `<case>_filter.png` next to its own files. Re-running it overwrites them.
 
 ```
-ls experiments/results/*_Pprbs5_run*/*.csv | wc -l
+python3 -m experiments.run_case --replay --extension filter
+```
+
+Only some runs, e.g. acrylic:
+
+```
+python3 -m experiments.run_case --replay experiments/results/acrylic_*_Pprbs5_run*/acrylic_*_run[0-9].csv --extension filter
+```
+
+The summaries above then show each run twice: as received by the Arduino, and as `<case>+filter`. The runs in `electrical-noise/` are one folder deeper, so give their CSVs to `--replay` directly.
+
+Check that all 24 files exist (should print 24; this leaves out the `_filter.csv` files):
+
+```
+ls experiments/results/*_Pprbs5_run*/*_run[0-9].csv | wc -l
 ```
 
 The earlier trial results are in `archive/trial_results/` and pilots go in `archive/pilot/`, so `experiments/results/` only holds this suite. Running `python3 -m experiments.summarise` with no file names summarises all of it.

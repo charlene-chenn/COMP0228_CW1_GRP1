@@ -13,6 +13,11 @@ shows which message bits were still wrong after decoding.
 
 To redraw a saved case, for example for the report:
     python3 -m experiments.live_view experiments/results/<case>/<case>.csv
+
+This also works on a receiver extension's results, <case>_<extension>.csv (see
+experiments/extensions.py). The picture then shows the extension's decisions, and
+the vibration strip shows the extension's level for each bit instead of peak-to-peak.
+run_case saves that picture, <case>_<extension>.png, whenever it writes the results.
 """
 import csv
 import queue
@@ -136,7 +141,8 @@ def saved_events(rows: dict, raw_dir: Path = None) -> list:
 
 class LiveView:
     def __init__(self, events: queue.Queue, case: str, layout: list, stop=None, save_path=None,
-                 raw: bool = False):
+                 raw: bool = False, level_label: str = "Peak-to-peak (ADC counts)",
+                 window_title: str = "PRBS live view"):
         """
         Set up the window.
 
@@ -147,6 +153,8 @@ class LiveView:
             stop (threading.Event, optional): set when the window closes.
             save_path (Path, optional): where to save a picture when the case ends.
             raw (bool, optional): show the raw signal panel. Defaults to False.
+            level_label (str, optional): what the vibration strip's values are.
+            window_title (str, optional): the window's title bar.
         """
         self.events = events
         self.case = case
@@ -157,6 +165,8 @@ class LiveView:
         self.stop = stop
         self.save_path = save_path
         self.show_raw = raw
+        self.level_label = level_label
+        self.window_title = window_title
 
         self.settle_ms = 0
         self.window_ms = 0
@@ -204,7 +214,7 @@ class LiveView:
         height = 8.5 + (2.0 if self.show_raw else 0) + 0.8 * max(0, len(map_heights) - 1)
 
         self.fig = plt.figure(figsize=(13, height), facecolor=SURFACE)
-        self.fig.canvas.manager.set_window_title("PRBS live view")
+        self.fig.canvas.manager.set_window_title(self.window_title)
         grid = self.fig.add_gridspec(
             len(top_heights) + len(map_heights) + 1, 3,
             height_ratios=[*top_heights, *map_heights, 1.1],
@@ -243,7 +253,7 @@ class LiveView:
     def _build_strip(self) -> None:
         ax = self.ax_strip
         ax.set_title(f"Vibration per bit, latest {STRIP_BITS} bits", loc="left", fontsize=11)
-        ax.set_ylabel("Peak-to-peak (ADC counts)")
+        ax.set_ylabel(self.level_label)
         ax.set_xlabel("Bits sent")
         ax.grid(axis="y", color=GRID, linewidth=0.8)
         ax.set_axisbelow(True)
@@ -515,7 +525,16 @@ class LiveView:
         ax.tick_params(length=0)
 
     def show(self) -> None:
-        """Open the window and refresh it until it is closed."""
+        """Open the window (and any others started) and refresh it until it is closed."""
+        self.start()
+        try:
+            plt.show()
+        finally:
+            if self.scope_window is not None:
+                self.scope_window.close()
+
+    def start(self) -> None:
+        """Start refreshing the window. It appears with the next plt.show()."""
         if self.stop is not None:
             self.fig.canvas.mpl_connect("close_event", lambda _: self.stop.set())
         if self.show_raw:
@@ -524,19 +543,29 @@ class LiveView:
         self.timer = self.fig.canvas.new_timer(interval=REFRESH_MS)
         self.timer.add_callback(self._tick)
         self.timer.start()
-        try:
-            plt.show()
-        finally:
-            if self.scope_window is not None:
-                self.scope_window.close()
 
 
-def main():
-    if len(sys.argv) != 2:
-        print(__doc__)
-        return
+def level_label(first_row: dict) -> str:
+    """What a saved case's per-bit values are: peak-to-peak, or an extension's level."""
+    case = first_row.get("case", "")
+    if "+" not in case:
+        return "Peak-to-peak (ADC counts)"
+    name = case.rsplit("+", 1)[1]
+    return "Filtered level (ADC counts)" if name == "filter" else f"{name} level"
 
-    path = Path(sys.argv[1])
+
+def view_saved(path: Path, show: bool = True) -> Path:
+    """
+    Draw a saved case (or an extension's results) and save the picture next to it.
+
+    Args:
+        path (Path): the CSV.
+        show (bool, optional): also open the window. Defaults to True.
+
+    Returns:
+        Path: the picture, <csv name>.png.
+    """
+    path = Path(path)
     with open(path, newline="") as file:
         rows = {i: row for i, row in enumerate(csv.DictReader(file))}
 
@@ -557,10 +586,24 @@ def main():
         events.put(event)
     events.put(("done", "Saved run"))
 
-    view = LiveView(events, path.stem, layout, save_path=path.with_suffix(".png"), raw=has_raw)
+    picture = path.with_suffix(".png")
+    view = LiveView(events, path.stem, layout, save_path=picture, raw=has_raw,
+                    level_label=level_label(first))
     view.update()
-    print("Saved", path.with_suffix(".png"))
-    plt.show()
+    if show:
+        plt.show()
+    else:
+        plt.close(view.fig)
+    return picture
+
+
+def main():
+    if len(sys.argv) != 2:
+        print(__doc__)
+        return
+    picture_path = Path(sys.argv[1]).with_suffix(".png")
+    print("Saved", picture_path)
+    view_saved(Path(sys.argv[1]))
 
 
 if __name__ == "__main__":

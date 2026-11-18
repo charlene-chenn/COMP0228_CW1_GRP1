@@ -1,0 +1,20 @@
+{
+  "wood": {
+    "lo": 103.408,
+    "hi": 133.408,
+    "drive_hz": 118.408,
+    "set_from": "wood_15cm_none_S150_W50_Pprbs5_run1"
+  },
+  "acrylic": {
+    "lo": 96.084,
+    "hi": 126.084,
+    "drive_hz": 111.084,
+    "set_from": "acrylic_15cm_none_S150_W50_Pprbs5_run1"
+  },
+  "pcb": {
+    "lo": 108.291,
+    "hi": 138.291,
+    "drive_hz": 123.291,
+    "set_from": "pcb_15cm_none_S150_W50_Pprbs5_run1"
+  }
+}

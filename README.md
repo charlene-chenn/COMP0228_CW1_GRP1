@@ -54,6 +54,25 @@ The raw piezo samples (10 kHz) for every string are saved in `experiments/result
 
 A full case at 50/50 takes about 14.6 minutes. Use `--codes none R3 R5` to run only some codes, or `--message-bits 64` for longer messages. Add `--run 2` when repeating a case, for example after re-mounting the piezo. Closing the viewer stops the case after the current string. Use `--sim` in place of `<port>` to try all of this with no hardware; those results go in `experiments/results/sim/`, which git ignores.
 
+## Receiver extensions
+
+An extension decides the bits again from a string's raw samples, in place of the Arduino's peak-to-peak and threshold, and the string's code then decodes those bits. The sending doesn't change, so every run with raw samples gives results for both. Each extension's results go in `<case>_<extension>.csv` next to the case's CSV, with the same columns, so `experiments.summarise` shows them as their own case (`<case>+filter`). The settings used are in the `notes` column. Its picture, `<case>_<extension>.png`, is saved alongside: the same view as the case's own picture, with the extension's decisions and its level for each bit (redraw it with `python3 -m experiments.live_view <case>_<extension>.csv`). The extensions are listed in `experiments/extensions.py`; `filter` is the filtering in `codes/filtering.py`.
+
+```
+# During a run: print the extension's errors under each string, and save its results at the end
+python3 -m experiments.run_case <port> --material wood --distance 15 --settle 150 --window 50 --prbs-per-code --sets 1 --extension filter
+
+# Only the extension, on saved runs (sends nothing, needs no port)
+python3 -m experiments.run_case --replay --extension filter
+python3 -m experiments.run_case --replay experiments/results/<case>/<case>.csv --extension filter
+
+# Filter settings
+python3 -m experiments.run_case --replay --extension filter --filter-band 70 105
+python3 -m experiments.run_case --replay --extension filter --filter-band 20 200 --filter-sharpen 40 --filter-notch 50
+```
+
+The filter's pass band is set once for each material, from the motor's frequency peak in all of that material's run 1 (`find_motor_band` in `codes/filtering.py`), and saved in `experiments/filter_bands.json`. Every run of that material then uses it (`--filter-band material`, the default), including live runs. Set or reset a material's band with `python3 -m experiments.run_case --set-band experiments/results/<run 1>/<run 1>.csv`. `--filter-band auto` finds the peak in each string by itself instead, and `LO HI` gives a fixed band in Hz. With `--live`, the filter gets its own window too, updated as each string finishes. The method and results are in `extensions.md`. Re-running `--replay` overwrites the extension's CSVs, so the latest settings are always what's saved.
+
 ## Raw signal files
 
 Each run gets its own folder holding its CSV, its picture and a `raw/` folder of raw piezo signals, one `.npz` per string sent, named `<block>_<set>_<code>.npz`. For example, one `--prbs-per-code --sets 1` run gives:
