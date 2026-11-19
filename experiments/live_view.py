@@ -551,7 +551,11 @@ def level_label(first_row: dict) -> str:
     if "+" not in case:
         return "Peak-to-peak (ADC counts)"
     name = case.rsplit("+", 1)[1]
-    return "Filtered level (ADC counts)" if name == "filter" else f"{name} level"
+    if name == "filter":
+        return "Filtered level (ADC counts)"
+    if name == "cnn":
+        return "CNN P(bit = 1) x 1000"
+    return f"{name} level"
 
 
 def view_saved(path: Path, show: bool = True) -> Path:

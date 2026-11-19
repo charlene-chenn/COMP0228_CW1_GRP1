@@ -2,7 +2,7 @@
 
 We send bits through a solid surface. A vibration motor on the specimen is switched on and off to send them, and a piezo disc on the same specimen picks the vibration up. An Arduino Giga R1 drives the motor and samples the piezo. Python on the laptop encodes each message with an error-correcting code, sends it, and decodes what comes back.
 
-We measured how well this works on three materials, at three distances and under two kinds of disturbance, with five codes. Then we added a receiver extension, a band-pass filter, that targets the main source of errors we found.
+We measured how well this works on three materials, at three distances and under two kinds of disturbance, with five codes. Then we added two receiver extensions that target the main source of errors we found: a band-pass filter, and a small neural network (a 1D CNN) trained on the recorded signals.
 
 ## How the channel works
 
@@ -36,40 +36,61 @@ All at settle 150 ms, window 50 ms. Not in the tables below:
 
 ## Core results
 
+### Summary
+
+- **The main source of errors is intersymbol interference, not random noise.** With the Arduino's peak-to-peak receiver, every 0 sent straight after a 1 is read as a 1, because the motor is still coasting down. That gives 13.5–15.5% channel errors in every case.
+- **Codes alone are a poor fix.** Only repetition corrects it (R3 and R5, 0–5% message errors), at a third or a fifth of the data rate. Hamming(7,4) leaves 23–28% message errors, and the convolutional code makes them worse (51–65%), because the errors come in patterns.
+- **The filter removes the interference.** With no disturbance, channel errors fall to 0–1.2% and every code decodes correctly, uncoded included. Under disturbance its midpoint threshold is the weak point: 7.8% channel errors with constant noise, and 23.8% with bursts (worse than the plain receiver).
+- **The network also removes it, and handles bursts best.** It has 0 channel errors in every case without disturbance (on wood and acrylic these are runs it was trained on; PCB it never saw). Under bursts it has 4.6% channel errors, and R3, R5 and the convolutional code then decode everything. Under constant noise it does worst of the two extensions (11.9%), reading most zeros after a 1 as 1s again.
+- **Fixing the receiver works better than adding redundancy.** With a good receiver, a rate-1/2 convolutional code is enough to decode every message in each condition:
+
+| Condition | Best receiver | Message errors with the convolutional code |
+|---|---|---|
+| No disturbance | filter or network | 0% |
+| Constant noise | filter | 0% |
+| Burst noise | network | 0% |
+
 ### Channel errors
 
-Bit errors before decoding, all 3 runs together (4 for constant noise), with 95% Wilson confidence intervals.
+Bit errors before decoding, all 3 runs together (4 for constant noise), with 95% Wilson confidence intervals. † marks cases the network was trained on, which aren't a fair test of it (see the notes below).
 
-| Case | Receiver (peak-to-peak) | Receiver + filter extension |
-|---|---|---|
-| Wood, 15 cm | 162 / 1203 = 13.5% [11.7, 15.5] | 0 / 1203 = 0.0% [0.0, 0.3] |
-| Wood, 30 cm | 162 / 1203 = 13.5% [11.7, 15.5] | 15 / 1203 = 1.2% [0.8, 2.0] |
-| Wood, 45 cm | 162 / 1203 = 13.5% [11.7, 15.5] | 5 / 1203 = 0.4% [0.2, 1.0] |
-| Acrylic, 15 cm | 176 / 1203 = 14.6% [12.7, 16.7] | 0 / 1203 = 0.0% [0.0, 0.3] |
-| PCB, 15 cm | 184 / 1203 = 15.3% [13.4, 17.4] | 0 / 1203 = 0.0% [0.0, 0.3] |
-| Wood, 15 cm, constant noise | 218 / 1604 = 13.6% [12.0, 15.4] | 125 / 1604 = 7.8% [6.6, 9.2] |
-| Wood, 15 cm, burst noise | 186 / 1203 = 15.5% [13.5, 17.6] | 286 / 1203 = 23.8% [21.5, 26.3] |
+| Case | Receiver (peak-to-peak) | Receiver + filter extension | Receiver + network extension |
+|---|---|---|---|
+| Wood, 15 cm | 162 / 1203 = 13.5% [11.7, 15.5] | 0 / 1203 = 0.0% [0.0, 0.3] | 0 / 1203 = 0.0% [0.0, 0.3] † |
+| Wood, 30 cm | 162 / 1203 = 13.5% [11.7, 15.5] | 15 / 1203 = 1.2% [0.8, 2.0] | 0 / 1203 = 0.0% [0.0, 0.3] † |
+| Wood, 45 cm | 162 / 1203 = 13.5% [11.7, 15.5] | 5 / 1203 = 0.4% [0.2, 1.0] | 0 / 1203 = 0.0% [0.0, 0.3] † |
+| Acrylic, 15 cm | 176 / 1203 = 14.6% [12.7, 16.7] | 0 / 1203 = 0.0% [0.0, 0.3] | 0 / 1203 = 0.0% [0.0, 0.3] † |
+| PCB, 15 cm | 184 / 1203 = 15.3% [13.4, 17.4] | 0 / 1203 = 0.0% [0.0, 0.3] | 0 / 1203 = 0.0% [0.0, 0.3] |
+| Wood, 15 cm, constant noise | 218 / 1604 = 13.6% [12.0, 15.4] | 125 / 1604 = 7.8% [6.6, 9.2] | 191 / 1604 = 11.9% [10.4, 13.6] |
+| Wood, 15 cm, burst noise | 186 / 1203 = 15.5% [13.5, 17.6] | 286 / 1203 = 23.8% [21.5, 26.3] | 55 / 1203 = 4.6% [3.5, 5.9] |
 
 ### Message errors after decoding
 
-Message bit error rate for each configuration and code: the share of decoded message bits that were wrong, all runs together (93 message bits per code, 124 for constant noise).
+Message bit error rate for each configuration and code: the share of decoded message bits that were wrong, all runs together (93 message bits per code, 124 for constant noise). † = the network was trained on these runs.
 
 | Configuration | Receiver | none (rate 1) | R3 (rate 1/3) | R5 (rate 1/5) | Hamming(7,4) (rate 4/7) | Convolutional 7,5 (rate 1/2) |
 |---|---|---|---|---|---|---|
 | Wood, 15 cm | peak-to-peak | 25.8% | 0.0% | 0.0% | 25.8% | 64.5% |
 | | filter | 0.0% | 0.0% | 0.0% | 0.0% | 0.0% |
+| | network † | 0.0% | 0.0% | 0.0% | 0.0% | 0.0% |
 | Wood, 30 cm | peak-to-peak | 25.8% | 0.0% | 0.0% | 25.8% | 64.5% |
 | | filter | 0.0% | 0.0% | 0.0% | 0.0% | 0.0% |
+| | network † | 0.0% | 0.0% | 0.0% | 0.0% | 0.0% |
 | Wood, 45 cm | peak-to-peak | 25.8% | 0.0% | 0.0% | 25.8% | 64.5% |
 | | filter | 1.1% | 0.0% | 0.0% | 0.0% | 0.0% |
+| | network † | 0.0% | 0.0% | 0.0% | 0.0% | 0.0% |
 | Acrylic, 15 cm | peak-to-peak | 26.9% | 4.3% | 0.0% | 28.0% | 63.4% |
 | | filter | 0.0% | 0.0% | 0.0% | 0.0% | 0.0% |
+| | network † | 0.0% | 0.0% | 0.0% | 0.0% | 0.0% |
 | PCB, 15 cm | peak-to-peak | 33.3% | 2.2% | 0.0% | 28.0% | 61.3% |
 | | filter | 0.0% | 0.0% | 0.0% | 0.0% | 0.0% |
+| | network | 0.0% | 0.0% | 0.0% | 0.0% | 0.0% |
 | Wood, 15 cm, constant noise | peak-to-peak | 26.6% | 0.0% | 0.0% | 25.8% | 64.5% |
 | | filter | 1.6% | 12.1% | 12.1% | 0.0% | 0.0% |
+| | network | 18.5% | 0.0% | 0.0% | 28.2% | 59.7% |
 | Wood, 15 cm, burst noise | peak-to-peak | 23.7% | 5.4% | 1.1% | 22.6% | 50.5% |
 | | filter | 2.2% | 30.1% | 38.7% | 12.9% | 14.0% |
+| | network | 3.2% | 0.0% | 0.0% | 1.1% | 0.0% |
 
 The convolutional code sends 66 channel bits for its 31 message bits (rate 0.47, with the tail bits). Hamming pads the message to 32 bits, so 56 channel bits (rate 0.55).
 
@@ -83,10 +104,13 @@ The convolutional code sends 66 channel bits for its 31 message bits (rate 0.47,
   - **Burst noise:** worse than the plain receiver overall.
 
   Both come from the filter's midpoint threshold, which is set halfway between each string's quiet and loud bits, so a few loud bits drag it upwards. Starting that search from the median level instead brings constant noise down to 2 errors (from 125) and burst noise to 175 (from 286). This was checked offline only and isn't in the code.
+- **The network learns the leakage too, and copes better with bursts.** On PCB, which it never saw in training, it reads every bit correctly, like the filter. Under burst noise it has 55 channel errors against the filter's 286, and R3, R5 and the convolutional code then decode everything. Most of its remaining burst errors (48 of 55) are a 0 after a 0 read as a 1, where a knock looks like the motor running.
+- **The network fails under constant noise.** It reads 186 of the 216 zeros sent after a 1 as 1s, the exact error it was trained to fix, so it does worse than the filter (191 errors against 125) and the convolutional code goes back to 60% message errors. It was only trained on quiet runs, and its envelope isn't band-passed, so a steady noise floor raises every level and a 0 after a 1 no longer looks like one it has seen. Training on noisy runs too, or band-passing before the envelope, would be the next things to try.
 
 Notes on these numbers:
 - The filter's band for each material was set from wood, acrylic and PCB 15 cm run 1, so those three runs aren't a fair test of the filter. Their results (0 errors) match the other runs.
 - The filter results are offline. They come from running the filter on the raw samples each run recorded, not from separate hardware runs. The same filter also runs during a live run (see "Receiver extensions").
+- The network was trained on every wood and acrylic run without disturbance (marked †), so its 0 errors there show only that it fits its training data. PCB, constant noise and burst noise are the fair tests: it never saw those runs. Its results are offline too.
 - 3 runs × 31 message bits per code is a small sample. The Wilson intervals above are for channel bits. Message-level intervals are wider.
 
 ### Other findings
@@ -138,7 +162,11 @@ python3 -m experiments.live_view experiments/results/<case>/<case>.csv    # redr
 
 ## Receiver extensions
 
-An extension decides the bits again from each string's raw samples, in place of the Arduino's peak-to-peak and threshold. The string's code then decodes those bits. The sending doesn't change, so every run with raw samples gives results for both receivers. The extensions are listed in `experiments/extensions.py`. `filter` is the filtering in `codes/filtering.py`:
+An extension decides the bits again from each string's raw samples, in place of the Arduino's peak-to-peak and threshold. The string's code then decodes those bits. The sending doesn't change, so every run with raw samples gives results for every receiver. The extensions are listed in `experiments/extensions.py`, and either or both can be run (`--extension filter`, `--extension cnn`, or `--extension filter cnn`).
+
+### Filter
+
+`filter` is the filtering in `codes/filtering.py`:
 
 ```
 raw samples -> band-pass around the motor's drive frequency -> envelope -> mean level in each bit -> midpoint threshold -> bits
@@ -168,6 +196,37 @@ python3 -m experiments.run_case --set-band experiments/results/<run 1>/<run 1>.c
 
 Each run's filter results go in `<case>_filter.csv` next to its own CSV, with the same columns, plus a picture `<case>_filter.png`. The settings used are in the `notes` column. `experiments.summarise` shows them as `<case>+filter`. Re-running `--replay` overwrites them. Other options: `--filter-band auto` (find the peak in each string by itself), `--filter-band LO HI` (a fixed band in Hz), `--filter-notch`, `--filter-sharpen`, `--filter-smooth`, `--filter-kind`.
 
+### Network
+
+`cnn` is a small 1D convolutional network in `codes/cnn_decoder.py`. Instead of fixing a filter and a threshold by hand, it learns from the recorded signals what each bit looks like, including the leftover vibration after a 1:
+
+```
+raw samples -> envelope -> 16 steps per bit -> this bit and 2 bits either side -> CNN -> P(bit = 1) -> bit
+```
+
+- **Input.** The envelope is the rectified signal, low-passed at 30 Hz (no band-pass). Each bit's slot starts when the motor was switched (`bit_start + switch_offset`) and is averaged into 16 steps of 12.8 ms, scaled so the string's loud level is about 1. For each bit the network sees its own 16 steps plus the 2 bits either side (80 steps), so it can see the motor spinning up and coasting down. A log copy of the envelope keeps small leftover levels visible next to a full 1.
+- **Model.** Two convolution layers (16 filters of width 5), then a 32-unit layer and two outputs: the probability that the bit is a 1, and which transition it was (0→0, 0→1, 1→0, 1→1). The second output is only used in training, to teach it the four level shapes. About 43,000 parameters.
+- **Training.** Adam, 60 epochs, with the level of each example randomly scaled by ±20% so it doesn't rely on one exact loudness. The saved model `models/cnn_decoder.pt` was trained on the wood and acrylic runs without disturbance (78 strings, 5,862 bits). That includes the 10 `electrical-noise/` acrylic strings, which the training script reads as undisturbed because of their folder names. A plain linear model on the same input is trained alongside as a baseline (`models/cnn_decoder_linear.pt`).
+- **Decision.** A bit is read as 1 when P(1) ≥ 0.5, then the string's code decodes as usual. Like the filter, it needs the whole string first, so it runs after each string, not bit by bit.
+
+It needs PyTorch (in `requirements.txt`). Its results go in `<case>_cnn.csv` and `<case>_cnn.png`, with the same columns as the filter's. The `vibration` column holds P(1) × 1000 and the threshold is 500. Strings the model was trained on are marked `in CNN training set` in the `notes` column.
+
+```
+# Offline, on saved runs
+python3 -m experiments.run_case --replay --extension cnn
+python3 -m experiments.run_case --replay --extension filter cnn         # both
+
+# Live, alongside the filter
+python3 -m experiments.run_case $PORT ... --extension filter cnn --live
+
+# Train or test the network itself (prints tables against the other receivers)
+python3 -m codes.cnn_decoder train                                       # default: trains on wood and acrylic, no disturbance
+python3 -m codes.cnn_decoder eval --test "material=pcb"
+python3 -m codes.cnn_decoder predict --npz experiments/results/<case>/raw/codes_0_R3.npz
+```
+
+`--cnn-model PATH` picks another trained model for `run_case`.
+
 ## Raw signal files
 
 Each run's folder holds its CSV, its picture (`<case>.png`), a video (`<case>.mp4`) and `raw/`, with one `.npz` per string named `<block>_<set>_<code>.npz`:
@@ -179,6 +238,8 @@ experiments/results/wood_15cm_none_S150_W50_Pprbs5_run1/
     wood_15cm_none_S150_W50_Pprbs5_run1.mp4
     wood_15cm_none_S150_W50_Pprbs5_run1_filter.csv
     wood_15cm_none_S150_W50_Pprbs5_run1_filter.png
+    wood_15cm_none_S150_W50_Pprbs5_run1_cnn.csv
+    wood_15cm_none_S150_W50_Pprbs5_run1_cnn.png
     raw/
         codes_0_none.npz
         codes_0_R3.npz

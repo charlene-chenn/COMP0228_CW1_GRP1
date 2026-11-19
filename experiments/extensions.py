@@ -10,15 +10,26 @@ extension.
 Each extension's results go next to the case's own CSV, with the same columns:
     experiments/results/<case>/<case>_<extension>.csv
 
+There are two extensions, and either or both can be run:
+    filter   band-pass, envelope and a threshold (codes/filtering.py)
+    cnn      a trained 1D CNN that decides each bit from the envelope around it
+             (codes/cnn_decoder.py; needs PyTorch and a trained model in models/)
+
 Run through run_case (see its --extension and --replay options):
     python3 -m experiments.run_case PORT --material wood --distance 15 ... --extension filter
     python3 -m experiments.run_case --replay --extension filter              # every saved case
+    python3 -m experiments.run_case --replay --extension cnn                 # the network instead
+    python3 -m experiments.run_case --replay --extension filter cnn          # both
     python3 -m experiments.run_case --replay experiments/results/<case>/<case>.csv --extension filter
 
 The filter's pass band is set once per material, from that material's run 1, and
 saved in experiments/filter_bands.json. Every run of that material then uses it,
 including live runs and new cases:
     python3 -m experiments.run_case --set-band experiments/results/<run 1>/<run 1>.csv
+
+The cnn extension's results note "in CNN training set" on strings the model was
+trained on, as those results aren't a fair test. To train the model:
+    python3 -m codes.cnn_decoder train
 
 To add an extension, write a function like filter_bits and add it to EXTENSIONS.
 """
@@ -33,6 +44,7 @@ import numpy as np
 from codes import CODES
 
 RESULTS_DIR = Path(__file__).parent / "results"
+PROJECT_DIR = Path(__file__).resolve().parent.parent
 
 # The filter's pass band for each material, set once from a run 1 (see set_band)
 BANDS_FILE = Path(__file__).parent / "filter_bands.json"
@@ -45,6 +57,15 @@ FILTER_DEFAULTS = {
     "material": None, "kind": "butter", "order": 4,
     "smooth_hz": 30.0, "notch_hz": None, "sharpen_tau_ms": None, "threshold": None,
 }
+
+# The network extension's settings. model is relative to the project folder.
+# train_spec is what the saved model was trained on (cnn_decoder train's default);
+# it is only used to flag the strings the model has already seen.
+CNN_DEFAULTS = {
+    "model": "models/cnn_decoder.pt",
+    "train_spec": "material=wood,acrylic;noise=none",
+}
+CNN_IN_TRAINING = "in CNN training set"
 
 
 def band_from_run(case_csv: Path) -> Tuple[float, float]:
@@ -165,13 +186,80 @@ def filter_bits(data, options: dict) -> Tuple[List[int], List[float], float]:
     return result["bits"], list(result["levels"]), result["threshold"]
 
 
+_cnn_models = {}
+
+
+def load_cnn(model: str):
+    """
+    The trained network at model (relative to the project folder), loaded once.
+    Raises RuntimeError if PyTorch isn't installed, FileNotFoundError if there's no model.
+    """
+    path = Path(model)
+    path = path if path.is_absolute() else PROJECT_DIR / path
+    if path not in _cnn_models:
+        try:
+            from codes.cnn_decoder import CnnDecoder
+        except ImportError as error:
+            raise RuntimeError("the cnn extension needs PyTorch: pip install -r requirements.txt") from error
+        if not path.exists():
+            raise FileNotFoundError(f"no trained model at {path}. Train one with: python3 -m codes.cnn_decoder train")
+        _cnn_models[path] = CnnDecoder.load(str(path))
+    return _cnn_models[path]
+
+
+def cnn_bits(data, options: dict) -> Tuple[List[int], List[float], float]:
+    """
+    The network extension (codes/cnn_decoder.py): the envelope of each bit's slot and
+    the 2 slots either side go into the trained CNN, which gives the probability that
+    the bit is a 1. A bit is read as 1 when that is 0.5 or more.
+
+    The levels are the probabilities x 1000, and the threshold 500, so they fit the
+    same whole-number columns and plots as the other receivers.
+
+    Args:
+        data: the string's raw .npz, as saved by run_case.save_raw (needs switch_offset).
+        options (dict): settings, see CNN_DEFAULTS.
+
+    Returns:
+        Tuple[List[int], List[float], float]: the bits, each bit's level, the threshold.
+    """
+    from codes.cnn_decoder import Recording
+
+    settings = {**CNN_DEFAULTS, **options}
+    decoder = load_cnn(settings["model"])
+    n_bits = len(data["sent"])   # only the number of bits is used, never their values
+    recording = Recording(
+        path="", code="", meta={}, samples=np.asarray(data["samples"], dtype=np.float32),
+        sent=np.zeros(n_bits, dtype=int), received=np.zeros(n_bits, dtype=int),
+        bit_start=np.asarray(data["bit_start"], dtype=int),
+        switch_offset=np.asarray(data["switch_offset"], dtype=int),
+        fs=float(data["sample_rate"]), settle_ms=float(data["settle_ms"]),
+    )
+    probabilities = decoder.probabilities(recording)
+    return [int(p >= 0.5) for p in probabilities], [float(p) * 1000 for p in probabilities], 500.0
+
+
+def in_cnn_training(raw_path: Path, data, options: dict) -> bool:
+    """Whether the network was trained on this string (same rules as cnn_decoder train)."""
+    from types import SimpleNamespace
+    from codes.cnn_decoder import matches, parse_meta
+
+    meta = parse_meta(str(raw_path))
+    if meta is None or float(data["settle_ms"]) != 150:
+        return False
+    return matches(SimpleNamespace(meta=meta), {**CNN_DEFAULTS, **options}["train_spec"])
+
+
 EXTENSIONS = {
     "filter": filter_bits,
+    "cnn": cnn_bits,
 }
 
 
 def describe(name: str, options: dict) -> str:
     """The settings an extension ran with, saved in the notes column of its results."""
+    if name == "cnn":
+        return f"cnn: model {({**CNN_DEFAULTS, **options})['model']}, read as 1 if P(1) >= 0.5"
     if name != "filter":
         return name
     s = {**FILTER_DEFAULTS, **options}
@@ -211,6 +299,8 @@ def saved_cases() -> List[Path]:
 def can_use(data) -> Optional[str]:
     """Why an extension can't read a string's raw samples, or None if it can."""
     lengths = np.diff(data["bit_start"])
+    if "switch_offset" in data and len(data["switch_offset"]) != len(data["sent"]):
+        return "the raw file doesn't have every motor switch time"
     if len(lengths) != len(data["sent"]):
         return "the raw file doesn't have every bit"
     if int(data["late_bits"]) > 0 or len(set(lengths.tolist())) != 1:
@@ -249,10 +339,12 @@ def extension_row(row: dict, case_csv: Path, name: str, options: dict) -> Option
     message = [int(bit) for bit in row["message"]]
     decoded = CODES[row["code"]].decode(received)[:len(message)]
 
+    trained = name == "cnn" and in_cnn_training(raw_path, data, options)
     return {
         **row,
         "case": f"{row['case']}+{name}",
-        "notes": "; ".join(filter(None, [row.get("notes", ""), describe(name, options)])),
+        "notes": "; ".join(filter(None, [row.get("notes", ""), describe(name, options),
+                                         CNN_IN_TRAINING if trained else ""])),
         "threshold": round(threshold),
         "received": "".join(str(bit) for bit in received),
         "vibration": " ".join(str(round(level)) for level in levels),
@@ -314,6 +406,9 @@ def replay(case_csv: Path, name: str, options: dict, quiet: bool = False) -> Opt
         after = sum(int(r["channel_errors"]) for r in done)
         bits = sum(int(r["channel_bits"]) for r in done)
         note = f", {skipped} strings skipped (no usable raw samples)" if skipped else ""
+        trained = sum(CNN_IN_TRAINING in r["notes"] for r in done)
+        if trained:
+            note += f", {trained} of {len(done)} strings were in the CNN's training set"
         print(f"{case_csv.stem}: channel errors {before} -> {after} of {bits} "
               f"({describe(name, options)}){note}")
     return path
@@ -339,6 +434,7 @@ def string_result(link, trial_code: str, sent: List[int], message: List[int],
     data = {
         "samples": np.concatenate(link.last_raw),
         "bit_start": np.concatenate([[0], np.cumsum(lengths)]),
+        "switch_offset": np.array(link.last_offsets or [], dtype=int),
         "sent": np.array(sent), "sample_rate": link.sample_rate,
         "settle_ms": link.settle_ms, "late_bits": link.last_late or 0,
     }

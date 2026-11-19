@@ -30,6 +30,7 @@ raw samples, and save their results to <case>_<extension>.csv:
     --extension filter              also run the filtering extension during the case
     --replay --extension filter     only run the extension, on every saved case
     --replay <case>.csv ... --extension filter     only on these cases
+    --extension cnn                 the trained network instead (--extension filter cnn for both)
 --replay sends nothing and needs no port, material or distance. With --live, each
 extension gets its own window too, updated as each string finishes.
 
@@ -347,8 +348,10 @@ def run_case(link, args, case: str, path: Path, fixed: dict,
     return True
 
 
-def extension_options(args) -> dict:
-    """The filtering extension's settings from the command line."""
+def extension_options(args, name: str) -> dict:
+    """An extension's settings from the command line."""
+    if name == "cnn":
+        return {"model": args.cnn_model}
     options = {
         "kind": args.filter_kind, "smooth_hz": args.filter_smooth,
         "notch_hz": args.filter_notch, "sharpen_tau_ms": args.filter_sharpen,
@@ -371,7 +374,7 @@ def print_extensions(link, args, trial: Trial, result: dict,
     for name in args.extension:
         sent = [int(bit) for bit in result["sent"]]
         outcome = extensions.string_result(link, trial.code, sent, trial.message,
-                                           name, extension_options(args), args.material)
+                                           name, extension_options(args, name), args.material)
         if outcome is None:
             print(f"{'':>8}{name}: no usable raw samples")
             continue
@@ -399,6 +402,15 @@ def check_bands(args) -> None:
             raise SystemExit(f"Can't use --extension filter: {error.args[0]}") from None
 
 
+def check_cnn(args) -> None:
+    """Stop before doing anything if the network can't run (no PyTorch or no model)."""
+    if "cnn" in args.extension:
+        try:
+            extensions.load_cnn(args.cnn_model)
+        except (RuntimeError, FileNotFoundError) as error:
+            raise SystemExit(f"Can't use --extension cnn: {error}") from None
+
+
 def save_extensions(args, path: Path) -> List[Path]:
     """
     Write <case>_<extension>.csv for each extension, from everything saved so far,
@@ -408,7 +420,7 @@ def save_extensions(args, path: Path) -> List[Path]:
 
     written = []
     for name in args.extension:
-        out = extensions.replay(path, name, extension_options(args))
+        out = extensions.replay(path, name, extension_options(args, name))
         if out is not None:
             written.append(out)
             print("Saved", view_saved(out, show=False))
@@ -492,6 +504,9 @@ def parse_args():
     ext.add_argument("--filter-notch", type=float, metavar="HZ", help="extra notch, e.g. 50")
     ext.add_argument("--filter-sharpen", type=float, metavar="TAU_MS",
                      help="undo the motor's spin-down with this time constant, e.g. 40")
+    ext.add_argument("--cnn-model", default=extensions.CNN_DEFAULTS["model"], metavar="PT",
+                     help="trained network for --extension cnn, relative to the project folder "
+                          f"(default {extensions.CNN_DEFAULTS['model']})")
 
     args = parser.parse_args()
     if args.filter_band not in (["material"], ["auto"]):
@@ -540,6 +555,7 @@ def main():
             print(f"{Path(csv_path).stem}: drive frequency {band['drive_hz']:.1f} Hz, "
                   f"band {band['lo']:.1f}-{band['hi']:.1f} Hz saved for every run of this material")
         return
+    check_cnn(args)
     if args.replay is not None:
         replay_main(args)
         return

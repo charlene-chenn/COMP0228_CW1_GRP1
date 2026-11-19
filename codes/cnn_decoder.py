@@ -159,7 +159,9 @@ def build_dataset(recs: Sequence[Recording]) -> Tuple[np.ndarray, np.ndarray, np
 def with_log_channel(x: torch.Tensor) -> torch.Tensor:
     """Add a log-level channel so small leftover levels after a 1 stay visible next to the full level."""
     env, flag = x[:, 0:1], x[:, 1:2]
-    return torch.cat([env, torch.log(env + 0.02), flag], 1)
+    # The envelope's low-pass can ring slightly below 0 after a loud burst; the floor keeps
+    # the log finite there and leaves every other value unchanged.
+    return torch.cat([env, torch.log((env + 0.02).clamp(min=1e-3)), flag], 1)
 
 # The CNN: filters find shapes in the window, then a small layer decides 1 or 0.
 # It also guesses the transition type, which teaches it spin-up and spin-down.
