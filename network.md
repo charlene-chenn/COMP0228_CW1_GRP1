@@ -92,7 +92,7 @@ python3 -m experiments.run_case --replay --extension cnn --cnn-model models/othe
 | Wood / acrylic, no disturbance | 13.5–14.6% | 0–1.2% | 0% (trained on these runs) |
 | PCB (never seen in training) | 15.3% | 0% | **0%** |
 | Burst noise | 15.5% | 23.8% | **4.6%**, after which R3, R5 and conv decode everything |
-| Constant noise | 13.6% | **7.8%** | 11.9%: reads 186 of 216 zeros after a 1 as 1s |
+| Constant noise | 13.6% | **6.6%** | 11.3%: reads 132 of 162 zeros after a 1 as 1s |
 
 - **Why it handles bursts better:** it looks at the whole bit's shape and its neighbours, not one window against a threshold that a few loud bits can drag. Most of its remaining burst errors (48 of 55) are a knock during a 0 that looks like the motor running.
 - **Why it fails under constant noise (likely cause):** it only ever saw quiet runs, and its envelope isn't band-passed. A steady noise floor raises every level, so a coasting 0 no longer looks like any 0 it was trained on. Training on noisy runs too, or band-passing before the envelope, would be the next things to try.

@@ -97,14 +97,19 @@ def case_name(args, source: str) -> str:
 
 
 def plan_trials(case: str, prbs_repeats: int, sets: int, message_bits: int,
-                prbs_only: bool, codes: List[str], prbs_per_code: bool = False) -> List[Trial]:
-    """List the strings to send, in order. The same case always gets the same order."""
+                prbs_only: bool, codes: List[str], prbs_per_code: bool = False,
+                fixed_order: bool = False) -> List[Trial]:
+    """
+    List the strings to send, in order. The same case always gets the same order.
+    With fixed_order, the codes go in the order given (e.g. for a demo) instead of shuffled.
+    """
     if prbs_per_code:
         trials = []
         for repeat in range(sets):
             # Shuffled so that slow drift can't favour whichever code goes last
             names = list(codes)
-            random.Random(f"{case}:{repeat}").shuffle(names)
+            if not fixed_order:
+                random.Random(f"{case}:{repeat}").shuffle(names)
             for name in names:
                 trials.append(Trial("codes", repeat, name, "prbs5", prbs(5)))
         return trials
@@ -117,7 +122,8 @@ def plan_trials(case: str, prbs_repeats: int, sets: int, message_bits: int,
     for seed in range(sets):
         # Shuffled so that slow drift can't favour whichever code goes last
         names = list(codes)
-        random.Random(f"{case}:{seed}").shuffle(names)
+        if not fixed_order:
+            random.Random(f"{case}:{seed}").shuffle(names)
         for name in names:
             trials.append(Trial("codes", seed, name, str(seed), random_message(seed, message_bits)))
 
@@ -127,7 +133,7 @@ def plan_trials(case: str, prbs_repeats: int, sets: int, message_bits: int,
 
 def planned(args, case: str) -> List[Trial]:
     return plan_trials(case, args.prbs_repeats, args.sets, args.message_bits,
-                       args.prbs_only, args.codes, args.prbs_per_code)
+                       args.prbs_only, args.codes, args.prbs_per_code, args.fixed_order)
 
 
 def load_done(path: Path) -> Dict[Tuple[str, str, str], dict]:
@@ -475,6 +481,8 @@ def parse_args():
     parser.add_argument("--prbs-only", action="store_true", help="skip the codes and reference")
     parser.add_argument("--prbs-per-code", action="store_true",
                         help="send PRBS-5 through every code, --sets times, and nothing else")
+    parser.add_argument("--fixed-order", action="store_true",
+                        help="send the codes in the order given by --codes, not shuffled (for a demo)")
     parser.add_argument("--live", action="store_true", help="show the live viewer")
     parser.add_argument("--no-raw", action="store_true", help="don't record the raw piezo samples")
     parser.add_argument("--countdown", type=int, default=3,
