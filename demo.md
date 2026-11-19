@@ -4,7 +4,7 @@ Two cases, each going through the same three methods in a fixed order:
 
 1. **No code**: the Arduino receiver on the raw PRBS-5 string (the baseline).
 2. **Repetition (R5)**: the same string, each bit sent 5 times, decoded by majority vote.
-3. **Filtering**: the filter extension decides every string again from its raw samples. Its result is printed under each string and shown in its own live window.
+3. **Filtering**: the filter extension decides every string again from its raw samples. Its result is printed under each string, and shown as its own row in the main window's error maps (`none · filter`, `R5 · filter`) as soon as each string finishes.
 
 The filter is a receiver, not a code, so it doesn't need its own string: it runs on the strings already sent. In the terminal, each string shows the Arduino's result, then the filter's directly underneath.
 
@@ -37,7 +37,7 @@ What each part does:
 | `--prbs-per-code --sets 1` | Each code sends the PRBS-5 string (31 bits) once |
 | `--codes none R5 --fixed-order` | No code, then R5, always in that order (the experiment suite shuffles the order; `--fixed-order` turns that off) |
 | `--extension filter` | Runs the filter on each string as soon as it finishes, using the material's saved band from `experiments/filter_bands.json` (wood 103–133 Hz, PCB 108–138 Hz) |
-| `--live` | Opens the live view for the Arduino, plus a second window for the filter |
+| `--live` | Opens the live view. Under each code's row in the error maps it adds the filter's row for the same string, and the stats panel adds the filter's error rate. The filter also gets its own full window |
 | `--no-video` | Skips making the video at the end, so you don't have to wait for it |
 | `--run 20` | A new run number, so it doesn't clash with runs 1–3. **A finished run is skipped if the same command is run again.** For a rehearsal or a second go, change the number (`--run 21`, `--run 22`, ...) |
 
@@ -82,3 +82,13 @@ Arduino threshold about 4,060–4,110.
 - **The filter removes them all.** It keeps only the motor's drive frequency, and the leftover vibration (including the PCB ringing at about 85 Hz) is outside the band, so it gets 0 errors on both materials without any code: the same result as R5, at 5 times the data rate.
 
 If a live result differs: a few extra errors usually mean the surface was touched or something moved during calibration, or the motor mount has shifted. The expected 8 should come back on a re-run (with a new `--run` number).
+
+## Code implementations
+
+| Code | File | Encode | Decode |
+|---|---|---|---|
+| Repetition (R3, R5) | [codes/repetition.py](codes/repetition.py) | [`encode_repetition`](codes/repetition.py#L4): each bit sent n times | [`decode_repetition`](codes/repetition.py#L23): majority vote over each group of n |
+| Hamming(7,4) | [codes/hamming.py](codes/hamming.py) | [`encode_hamming`](codes/hamming.py#L4): 3 parity bits per 4 data bits | [`decode_hamming`](codes/hamming.py#L33): corrects 1 error per 7-bit block |
+| Convolutional (7, 5), rate 1/2 | [codes/convolutional.py](codes/convolutional.py) | [`conv_encode`](codes/convolutional.py#L4): 2 parity bits per message bit, plus 2 tail bits | [`decode_viterbi`](codes/convolutional.py#L26): Viterbi, most likely path through the encoder's states |
+
+All codes are registered by name (`none`, `R3`, `R5`, `hamming74`, `conv75`) in [codes/\_\_init\_\_.py](codes/__init__.py#L33), which is where `--codes` looks them up.

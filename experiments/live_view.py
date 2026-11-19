@@ -18,6 +18,11 @@ This also works on a receiver extension's results, <case>_<extension>.csv (see
 experiments/extensions.py). The picture then shows the extension's decisions, and
 the vibration strip shows the extension's level for each bit instead of peak-to-peak.
 run_case saves that picture, <case>_<extension>.png, whenever it writes the results.
+
+With --extension during a live run, the main window's error maps also get a row
+for each extension under each string (e.g. "R5 · filter"), so the Arduino's and
+the extension's results on the same string sit side by side. The stats panel adds
+each extension's channel bit error rate.
 """
 import csv
 import queue
@@ -54,7 +59,7 @@ MAX_RUN_SHOWN = 8    # Longer error runs are counted in the last bar
 REFRESH_MS = 300     # How often to check for updates and redraw
 
 
-def map_layout(strings) -> list:
+def map_layout(strings, extensions=()) -> list:
     """
     Work out the error maps to draw: one for each length of PRBS string, and for
     coded strings one map of channel bits and one of decoded message bits.
@@ -62,6 +67,8 @@ def map_layout(strings) -> list:
     Args:
         strings: (block, index, code, channel bits, message bits) for each string
             the viewer shows, in the order sent.
+        extensions: receiver extensions to give their own row under each string,
+            with id (block, index, code, extension).
 
     Returns:
         list: a dict for each map, with its key, title, x label, width, and the
@@ -79,8 +86,12 @@ def map_layout(strings) -> list:
                 "xlabel": f"Position in {prbs_name(length)} string (bit)",
                 "width": length, "rows": [], "labels": [],
             })
+            label = row_label(block, int(index))
             spec["rows"].append(row)
-            spec["labels"].append(row_label(block, int(index)))
+            spec["labels"].append(label)
+            for name in extensions:
+                spec["rows"].append((*row, name))
+                spec["labels"].append(f"{label} · {name}")
 
     maps = list(prbs_maps.values())
     if not coded:
@@ -90,8 +101,15 @@ def map_layout(strings) -> list:
     order = list(CODES)
     coded.sort(key=lambda item: (item[0][1], order.index(item[0][2])))
     several_sets = len({row[1] for row, _, _ in coded}) > 1
-    rows = [row for row, _, _ in coded]
-    labels = [f"{code} #{index + 1}" if several_sets else code for _, index, code in rows]
+    rows, labels = [], []
+    for row, _, _ in coded:
+        _, index, code = row
+        label = f"{code} #{index + 1}" if several_sets else code
+        rows.append(row)
+        labels.append(label)
+        for name in extensions:
+            rows.append((*row, name))
+            labels.append(f"{label} · {name}")
 
     maps.append({
         "key": "channel", "title": "Channel bits: where each coded string went wrong",
@@ -136,6 +154,22 @@ def saved_events(rows: dict, raw_dir: Path = None) -> list:
             message = [int(bit) for bit in row["message"]]
             decoded = [int(bit) for bit in row["decoded"]]
             events.append(("decoded", row_id, message, decoded))
+    return events
+
+
+def saved_extension_events(rows: dict, name: str) -> list:
+    """An extension's saved strings as updates for its rows in the main window."""
+    events = []
+    for row in rows.values():
+        if not shown(row["block"], row["seed"]):
+            continue
+        sent = [int(bit) for bit in row["sent"]]
+        received = [int(bit) for bit in row["received"]]
+        coded = row["block"] == "codes"
+        events.append(("ext_string", name, map_key(row["block"], len(sent)),
+                       (row["block"], int(row["index"]), row["code"], name), sent, received,
+                       [int(b) for b in row["message"]] if coded else None,
+                       [int(b) for b in row["decoded"]] if coded else None))
     return events
 
 
@@ -194,6 +228,7 @@ class LiveView:
             self.after[key] = [0, 0]
         self.runs = Counter()
         self.run = 0
+        self.ext_counts = {}                          # extension: [channel errors, bits]
 
         self._build()
 
@@ -331,6 +366,16 @@ class LiveView:
                 info["raster"][row, i] = CORRECT if want == got else (
                     WRONG_SENT_0 if want == 0 else WRONG_SENT_1)
 
+        elif kind == "ext_string":
+            # An extension's decisions on a string, for its own row in the maps
+            _, name, key, row_id, sent, received, message, decoded = event
+            self._fill_row(key, row_id, sent, received)
+            if message is not None and "decoded" in self.maps:
+                self._fill_row("decoded", row_id, message, decoded)
+            counts = self.ext_counts.setdefault(name, [0, 0])
+            counts[0] += sum(a != b for a, b in zip(sent, received))
+            counts[1] += len(sent)
+
         elif kind == "config":
             _, self.settle_ms, self.window_ms, self.sample_rate = event
             self._to_scopes("config", self.settle_ms, self.window_ms, self.sample_rate)
@@ -365,6 +410,15 @@ class LiveView:
         else:
             self._end_run()
             self.raster[self.row, index] = CORRECT
+
+    def _fill_row(self, key, row_id, want, got) -> None:
+        """Colour one whole row of a map, if the map has that row."""
+        info = self.maps.get(key)
+        if info is None or row_id not in info["rows"]:
+            return
+        row = info["rows"].index(row_id)
+        for i, (w, g) in enumerate(zip(want, got)):
+            info["raster"][row, i] = CORRECT if w == g else (WRONG_SENT_0 if w == 0 else WRONG_SENT_1)
 
     def _end_run(self) -> None:
         if self.run:
@@ -468,6 +522,8 @@ class LiveView:
             f"Sent 0, read 1: {self._share(0)}",
             f"Sent 1, read 0: {self._share(1)}",
         ]
+        for name, (errors, n) in self.ext_counts.items():
+            lines.append(f"{name}: {errors:,} wrong of {n:,}" + (f" ({errors / n:.2%})" if n else ""))
         ax.text(0, 0.42, "\n".join(lines), va="top", color=INK_SECONDARY, linespacing=1.5)
 
     def _share(self, sent: int) -> str:

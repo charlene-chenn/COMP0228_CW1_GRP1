@@ -349,7 +349,7 @@ def run_case(link, args, case: str, path: Path, fixed: dict,
                 f"channel errors {result['channel_errors']}/{result['channel_bits']}, "
                 f"message errors {result['info_errors']}/{result['info_bits']}"
             )
-            print_extensions(link, args, trial, result, ext_events)
+            print_extensions(link, args, trial, result, ext_events, events)
 
     return True
 
@@ -372,10 +372,12 @@ def extension_options(args, name: str) -> dict:
 
 
 def print_extensions(link, args, trial: Trial, result: dict,
-                     ext_events: Optional[Dict[str, queue.Queue]] = None) -> None:
+                     ext_events: Optional[Dict[str, queue.Queue]] = None,
+                     events: Optional[queue.Queue] = None) -> None:
     """
     Under each string's line, how every extension did on the same string. With
-    --live, also send the extension's decisions to its own window.
+    --live, also send the extension's decisions to its own window, and to its rows
+    in the main window's error maps.
     """
     for name in args.extension:
         sent = [int(bit) for bit in result["sent"]]
@@ -388,10 +390,18 @@ def print_extensions(link, args, trial: Trial, result: dict,
               f"{result['channel_bits']}, message errors {outcome['info_errors']}/"
               f"{result['info_bits']}")
 
-        view = (ext_events or {}).get(name)
-        if view is None or not shown(trial.block, trial.seed):
+        if not shown(trial.block, trial.seed):
             continue
         row = (trial.block, trial.index, trial.code)
+        if events is not None:
+            coded = trial.block == "codes"
+            events.put(("ext_string", name, map_key(trial.block, len(sent)), (*row, name), sent,
+                        [int(bit) for bit in outcome["received"]],
+                        trial.message if coded else None,
+                        [int(bit) for bit in outcome["decoded"]] if coded else None))
+        view = (ext_events or {}).get(name)
+        if view is None:
+            continue
         view.put(("trial", map_key(trial.block, len(sent)), row, sent, round(outcome["threshold"])))
         for i, (bit, level) in enumerate(zip(outcome["received"], outcome["levels"])):
             view.put(("bit", i, int(bit), round(level), None))
@@ -602,16 +612,17 @@ def main():
         return
 
     # The viewer has to stay on the main thread, so the case runs on another
-    from experiments.live_view import LiveView, map_layout, saved_events
+    from experiments.live_view import LiveView, map_layout, saved_events, saved_extension_events
 
     events = queue.Queue()
     stop = threading.Event()
     outcome = {"finished": False, "error": None}
 
-    layout = map_layout(
-        (t.block, t.index, t.code, len(CODES[t.code].encode(t.message)), len(t.message))
-        for t in planned(args, case) if shown(t.block, t.seed)
-    )
+    strings = [(t.block, t.index, t.code, len(CODES[t.code].encode(t.message)), len(t.message))
+               for t in planned(args, case) if shown(t.block, t.seed)]
+    layout = map_layout(strings)
+    # The main window also gets a row for each extension under each string
+    main_layout = map_layout(strings, args.extension)
 
     check_header(path)
     for event in saved_events(load_done(path), path.parent / "raw"):
@@ -624,8 +635,11 @@ def main():
     for name, ext_queue in ext_events.items():
         ext_path = extensions.extension_path(path, name)
         if ext_path.exists():
-            for event in saved_events(load_done(ext_path)):
+            saved = load_done(ext_path)
+            for event in saved_events(saved):
                 ext_queue.put(event)
+            for event in saved_extension_events(saved, name):
+                events.put(event)
         ext_views.append(LiveView(
             ext_queue, f"{case}_{name}", layout,
             level_label="Filtered level (ADC counts)" if name == "filter" else f"{name} level",
@@ -646,7 +660,7 @@ def main():
             ext_queue.put(("done", message))
 
     worker = threading.Thread(target=work, daemon=True)
-    view = LiveView(events, case, layout, stop, path.with_suffix(".png"), raw=not args.no_raw)
+    view = LiveView(events, case, main_layout, stop, path.with_suffix(".png"), raw=not args.no_raw)
     for ext_view in ext_views:
         ext_view.start()
     worker.start()
