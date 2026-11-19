@@ -109,10 +109,50 @@ Live, with a second window showing the filter's decisions as each string finishe
 python3 -m experiments.run_case $PORT --material acrylic --distance 15 --settle 150 --window 50 --prbs-per-code --sets 3 --codes none --run 5 --extension filter --live
 ```
 
+### The threshold
+
+After the band-pass and envelope, each bit has one level: the mean envelope in its measuring window. The filter decides 0 or 1 by comparing each level with a threshold, set separately for every string from that string's own levels (`codes/filtering.py`, `midpoint_threshold`).
+
+**In one line:** the filter splits each string's bit levels into a quiet group and a loud group, and puts the threshold halfway between their averages, repeating until no bit changes group. This is 2-means clustering, done without knowing which bits were sent.
+
+```python
+t = (levels.min() + levels.max()) / 2        # first guess
+for _ in range(20):
+    lo = levels[levels < t]                  # quiet group: every level below t
+    hi = levels[levels >= t]                 # loud group: every level at or above t
+    if len(lo) == 0 or len(hi) == 0:
+        break
+    t = (lo.mean() + hi.mean()) / 2          # halfway between the two group averages
+```
+
+1. **First guess.** t is halfway between the quietest and loudest level in the string.
+2. **Groups.** The groups aren't fixed in advance. The quiet group is every bit whose level is below the current t, and the loud group is every bit at or above it.
+3. **Update.** t moves to halfway between the quiet group's average and the loud group's average.
+4. **Repeat.** With the new t, some bits may switch groups, so steps 2–3 repeat until no bit switches (at most 20 rounds). Because t always sits halfway between the two averages, each bit ends up in whichever group's average it's nearer to.
+
+The sent bits are never used. They're only compared with the result afterwards, to count errors, so the threshold could be set on a message whose content is unknown.
+
+**Example** (wood 15 cm, run 1, convolutional string, 66 bits):
+
+| Round | t | Quiet group | Loud group |
+|---|---|---|---|
+| First guess | (2 + 22,753) / 2 = 11,378 | 41 bits, average 2,123: all 34 real 0s, plus 7 quieter 1s (about 10,000–11,000) | 25 bits, average 17,576 |
+| 1 | (2,123 + 17,576) / 2 = 9,849 | 34 bits, average 318: just the 0s | 32 bits, average 16,113: all the 1s |
+| 2 | (318 + 16,113) / 2 = 8,216 | No bit switches, so it stops | |
+
+The first guess was too high: 7 quieter 1s fell into the quiet group, raising its average, which pulled t down until they moved across. The final gap is wide: the loudest 0 is 896 and the quietest 1 is 10,302.
+
+**Compared with the Arduino's threshold.** The Arduino sets one threshold per run at start-up, from 3 s of background noise with the motor off (the loudest noise + 3,000 ADC counts, about 3,425 on wood). It only knows how loud silence is, so a 0 after a 1, with the motor still coasting down (6,000–9,300 peak-to-peak in the string above), reads as a 1. The filter's threshold is set from the bits themselves, so it adapts to each material, distance and mounting without knowing in advance how loud a 1 will be.
+
+**Weaknesses:**
+- **It needs both 0s and 1s in the string.** An all-0 string would be split down the middle of its noise. The PRBS strings always have both.
+- **It needs the whole string first,** so it decides once per string, not bit by bit.
+- **A few very loud bits drag it upwards.** The first guess depends on the single loudest bit, and the loud group is summarised by its average. So a few extra-loud bits (knocks, bursts) raise t, normal 1s fall below it, and they're read as 0s. This is why every filter error under disturbance is a 1 read as a 0: 125 errors with constant noise and 286 with bursts (README, "What the results show"). Starting the search from the median level instead brought these down to 2 and 175. That was checked offline only and isn't in the code.
+
 ### Caveats
 
 - **The run each band was set from is in the results.** Its numbers aren't a fair test. Report the other runs, and give those separately.
 - **A new material needs a band first.** Run 1 for it, then `--set-band`. Until then, `--extension filter` refuses to start for that material.
 - **The band follows the motor and its supply voltage.** If either changes, set the band again from a new run 1.
 - **Only measured at 150/50.** At a shorter settle time, the window would be closer to switch-off, where the motor hasn't slowed as far, so its frequency is closer to the band.
-- **The midpoint threshold** needs both 0s and 1s in each string, and the whole string before deciding (see README). So the live window updates once per string, not per bit.
+- **The midpoint threshold** needs both 0s and 1s in each string, and the whole string before deciding (see "The threshold" above). So the live window updates once per string, not per bit.
