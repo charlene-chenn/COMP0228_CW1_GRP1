@@ -1,8 +1,7 @@
 // Sends bits with the motor and reads them back with the piezo on the same board.
 // Bits are on/off keyed: "1" = motor on for the whole bit, "0" = motor off.
-// This sketch only handles 0s and 1s. Encoding and decoding happen in Python.
+// Encoding and decoding happen in Python.
 //
-// Same serial commands as piezo_reciever.ino, on the piezo_receiver_v2 hardware.
 // Samples A0 continuously with DMA, and all bit timing is counted in samples.
 //
 // Serial commands (USB, each ending in a newline):

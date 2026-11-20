@@ -1,0 +1,26 @@
+% Requires: \usepackage{booktabs}
+\begin{table}[!t]
+\centering
+\caption{Channel BER (\%) for each receiver, over all five coded strings (401 channel bits per run): mean over three runs $\pm$ sample standard deviation. Cells without a deviation gave the same result in all three runs. Both disturbances were applied on wood at 15\,cm.}
+\label{tab:ber_extensions}
+\footnotesize
+\setlength{\tabcolsep}{4pt}
+\begin{tabular*}{\columnwidth}{@{\extracolsep{\fill}}lccc@{}}
+\toprule
+\textbf{Condition} & \textbf{Peak-to-peak} & \textbf{Filter} & \textbf{Network} \\
+\midrule
+Wood, 15\,cm & 13.5 & 0.0 & 0.0$^{*}$ \\
+Wood, 30\,cm & 13.5 & 1.2{\scriptsize\,$\pm$\,1.9} & 0.0$^{*}$ \\
+Wood, 45\,cm & 13.5 & 0.4{\scriptsize\,$\pm$\,0.3} & 0.0$^{*}$ \\
+Acrylic, 15\,cm & 14.6{\scriptsize\,$\pm$\,0.3} & 0.0 & 0.0$^{*}$ \\
+PCB, 15\,cm & 15.3{\scriptsize\,$\pm$\,1.9} & 0.0 & 0.0 \\
+\midrule
+Constant noise & 13.6{\scriptsize\,$\pm$\,0.1} & 6.6{\scriptsize\,$\pm$\,10.9} & 11.3{\scriptsize\,$\pm$\,2.4} \\
+Burst noise & 15.5{\scriptsize\,$\pm$\,2.4} & 23.8{\scriptsize\,$\pm$\,7.7} & 4.6{\scriptsize\,$\pm$\,1.0} \\
+\bottomrule
+\end{tabular*}
+\par\vspace{2pt}
+\begin{minipage}{\columnwidth}\scriptsize
+$^{*}$The network was trained on these runs, so these cells show only that it fits its training data.
+\end{minipage}
+\end{table}

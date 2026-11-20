@@ -19,17 +19,7 @@ RESULTS_DIR = Path(__file__).parent / "results"
 
 
 def wilson(errors: int, total: int, z: float = 1.96) -> Tuple[float, float]:
-    """
-    95% Wilson confidence interval for an error rate.
-
-    Args:
-        errors (int): number of wrong bits.
-        total (int): number of bits.
-        z (float, optional): the z-score for the interval. Defaults to 1.96.
-
-    Returns:
-        Tuple[float, float]: the lower and upper limits, as fractions.
-    """
+    """95% Wilson confidence interval for an error rate, as fractions."""
     if total == 0:
         return 0.0, 1.0
 

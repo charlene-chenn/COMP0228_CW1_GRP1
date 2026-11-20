@@ -2,15 +2,11 @@
 Receiver extensions: other ways of turning a string's raw piezo samples into bits.
 
 The Arduino decides each bit by peak-to-peak against its calibrated threshold.
-An extension makes its own decision from the raw samples saved for the string,
-then the string's code decodes those bits as usual. Nothing about the sending
-changes, so one hardware run gives results for the plain receiver and for every
-extension.
+An extension decides again from the saved raw samples, and the string's code
+decodes those bits as usual, so one hardware run gives results for the plain
+receiver and every extension. Results go next to the case's CSV, with the same
+columns, as experiments/results/<case>/<case>_<extension>.csv.
 
-Each extension's results go next to the case's own CSV, with the same columns:
-    experiments/results/<case>/<case>_<extension>.csv
-
-There are two extensions, and either or both can be run:
     filter   band-pass, envelope and a threshold (codes/filtering.py)
     cnn      a trained 1D CNN that decides each bit from the envelope around it
              (codes/cnn_decoder.py; needs PyTorch and a trained model in models/)
@@ -22,9 +18,8 @@ Run through run_case (see its --extension and --replay options):
     python3 -m experiments.run_case --replay --extension filter cnn          # both
     python3 -m experiments.run_case --replay experiments/results/<case>/<case>.csv --extension filter
 
-The filter's pass band is set once per material, from that material's run 1, and
-saved in experiments/filter_bands.json. Every run of that material then uses it,
-including live runs and new cases:
+The filter's pass band is set once per material, from its run 1, and saved in
+experiments/filter_bands.json:
     python3 -m experiments.run_case --set-band experiments/results/<run 1>/<run 1>.csv
 
 The cnn extension's results note "in CNN training set" on strings the model was
@@ -73,13 +68,7 @@ def band_from_run(case_csv: Path) -> Tuple[float, float]:
     A pass band from one saved run: filtering.find_motor_band (the strongest peak in
     the spectrum, plus or minus 15 Hz) on every raw sample of every string in the run,
     joined together. One string alone is too short: on PCB its strongest peak is
-    sometimes not the motor's drive frequency.
-
-    Args:
-        case_csv (Path): the run's CSV.
-
-    Returns:
-        Tuple[float, float]: the band's lower and upper edges in Hz.
+    sometimes not the motor's drive frequency. Returns (lo, hi) in Hz.
     """
     from codes.filtering import find_motor_band
 
@@ -109,13 +98,7 @@ def load_bands() -> Dict[str, dict]:
 def set_band(case_csv: Path) -> dict:
     """
     Set the band for a run's material from that run (use the material's run 1),
-    and save it in BANDS_FILE. Every later filter result for the material uses it.
-
-    Args:
-        case_csv (Path): the run's CSV.
-
-    Returns:
-        dict: the saved entry.
+    and save it in BANDS_FILE. Returns the saved entry.
     """
     case_csv = Path(case_csv)
     with open(case_csv, newline="") as file:
@@ -158,13 +141,8 @@ def filter_bits(data, options: dict) -> Tuple[List[int], List[float], float]:
     """
     The filtering extension (codes/filtering.py): band-pass, envelope, mean level
     in each measuring window, then a threshold (the midpoint by default).
-
-    Args:
-        data: the string's raw .npz, as saved by run_case.save_raw.
-        options (dict): settings, see FILTER_DEFAULTS.
-
-    Returns:
-        Tuple[List[int], List[float], float]: the bits, each bit's level, the threshold.
+    data is the string's .npz from run_case.save_raw. Returns the bits, each bit's
+    level and the threshold.
     """
     from codes.filtering import filter_and_detect, find_motor_band
 
@@ -214,14 +192,7 @@ def cnn_bits(data, options: dict) -> Tuple[List[int], List[float], float]:
     the bit is a 1. A bit is read as 1 when that is 0.5 or more.
 
     The levels are the probabilities x 1000, and the threshold 500, so they fit the
-    same whole-number columns and plots as the other receivers.
-
-    Args:
-        data: the string's raw .npz, as saved by run_case.save_raw (needs switch_offset).
-        options (dict): settings, see CNN_DEFAULTS.
-
-    Returns:
-        Tuple[List[int], List[float], float]: the bits, each bit's level, the threshold.
+    same whole-number columns and plots as the other receivers. data needs switch_offset.
     """
     from codes.cnn_decoder import Recording
 
@@ -311,16 +282,7 @@ def can_use(data) -> Optional[str]:
 def extension_row(row: dict, case_csv: Path, name: str, options: dict) -> Optional[dict]:
     """
     Redo one saved string with an extension's decision in place of the Arduino's.
-
-    Args:
-        row (dict): the string's row from the case CSV.
-        case_csv (Path): the case CSV, which raw_file is relative to.
-        name (str): the extension, a key of EXTENSIONS.
-        options (dict): the extension's settings.
-
-    Returns:
-        Optional[dict]: the row with the extension's received bits, levels, threshold,
-        decoded message and errors, or None if the string has no usable raw samples.
+    Returns None if the string has no usable raw samples.
     """
     if not row.get("raw_file"):
         return None
@@ -360,15 +322,7 @@ def replay(case_csv: Path, name: str, options: dict, quiet: bool = False) -> Opt
     """
     Run an extension over every saved string of a case and write <case>_<name>.csv.
     The file is rewritten from scratch each time, so it always matches the case CSV.
-
-    Args:
-        case_csv (Path): the case's own CSV.
-        name (str): the extension, a key of EXTENSIONS.
-        options (dict): the extension's settings.
-        quiet (bool, optional): don't print anything. Defaults to False.
-
-    Returns:
-        Optional[Path]: the file written, or None if no string had usable raw samples.
+    Returns None if no string had usable raw samples.
     """
     case_csv = Path(case_csv)
     try:
@@ -418,11 +372,7 @@ def string_result(link, trial_code: str, sent: List[int], message: List[int],
                   name: str, options: dict, material: str) -> Optional[dict]:
     """
     The extension's decision on the string just sent, from the link's raw samples,
-    for showing during a run.
-
-    Returns:
-        Optional[dict]: received bits, levels, threshold, decoded message, channel and
-        message errors; or None if there are no usable raw samples or no band.
+    for showing during a run. None if there are no usable raw samples or no band.
     """
     if getattr(link, "last_raw", None) is None or not link.last_raw:
         return None

@@ -58,17 +58,7 @@ def string_label(row: dict) -> str:
 
 
 def make_video(csv_path: Path, out_path: Path = None, quiet: bool = False) -> Path:
-    """
-    Render the case's raw signal to an mp4.
-
-    Args:
-        csv_path (Path): the case's CSV.
-        out_path (Path, optional): where to write. Defaults to <case>.mp4 next to the CSV.
-        quiet (bool, optional): don't print progress. Defaults to False.
-
-    Returns:
-        Path: the video file.
-    """
+    """Render the case's raw signal to an mp4 (by default <case>.mp4 next to the CSV)."""
     # Drawn off screen, without pyplot, so it can't disturb a live viewer's window
     from matplotlib import rc_context
     from matplotlib.backends.backend_agg import FigureCanvasAgg

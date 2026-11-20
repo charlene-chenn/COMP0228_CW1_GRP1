@@ -1,0 +1,28 @@
+% Requires: \usepackage{booktabs}
+\begin{table*}[!t]
+\centering
+\caption{Channel and message bit error rates (\%) with the peak-to-peak receiver: mean over three runs $\pm$ sample standard deviation. Cells without a deviation gave the same result in all three runs. Channel BER counts bit errors before decoding; message BER counts errors in the 31 decoded message bits per run. For the uncoded string the two are equal.}
+\label{tab:ber_codes}
+\footnotesize
+\setlength{\tabcolsep}{3pt}
+\begin{tabular*}{\textwidth}{@{\extracolsep{\fill}}lcc c cc cc cc cc@{}}
+\toprule
+ & & & \textbf{Uncoded} & \multicolumn{2}{c}{\textbf{R3}} & \multicolumn{2}{c}{\textbf{R5}} & \multicolumn{2}{c}{\textbf{Hamming(7,4)}} & \multicolumn{2}{c}{\textbf{Conv.\ (7,5)}} \\
+ & & & rate 1 & \multicolumn{2}{c}{rate 1/3} & \multicolumn{2}{c}{rate 1/5} & \multicolumn{2}{c}{rate 4/7} & \multicolumn{2}{c}{rate 1/2} \\
+\cmidrule(lr){4-4}\cmidrule(lr){5-6}\cmidrule(lr){7-8}\cmidrule(lr){9-10}\cmidrule(lr){11-12}
+\textbf{Material} & \textbf{Dist.\ (cm)} & \textbf{Disturbance} & BER & Ch. & Msg. & Ch. & Msg. & Ch. & Msg. & Ch. & Msg. \\
+\midrule
+Wood & 15 & None & 25.8 & 8.6 & 0.0 & 5.2 & 0.0 & 25.0 & 25.8 & 24.2 & 64.5 \\
+Wood & 30 & None & 25.8 & 8.6 & 0.0 & 5.2 & 0.0 & 25.0 & 25.8 & 24.2 & 64.5 \\
+Wood & 45 & None & 25.8 & 8.6 & 0.0 & 5.2 & 0.0 & 25.0 & 25.8 & 24.2 & 64.5 \\
+Acrylic & 15 & None & 26.9{\scriptsize\,$\pm$\,1.9} & 10.0{\scriptsize\,$\pm$\,1.6} & 4.3{\scriptsize\,$\pm$\,4.9} & 5.8{\scriptsize\,$\pm$\,0.6} & 0.0 & 27.4{\scriptsize\,$\pm$\,2.1} & 28.0{\scriptsize\,$\pm$\,1.9} & 25.3{\scriptsize\,$\pm$\,0.9} & 63.4{\scriptsize\,$\pm$\,1.9} \\
+PCB & 15 & None & 33.3{\scriptsize\,$\pm$\,6.7} & 9.3{\scriptsize\,$\pm$\,0.6} & 2.2{\scriptsize\,$\pm$\,1.9} & 6.9{\scriptsize\,$\pm$\,3.0} & 0.0 & 26.8{\scriptsize\,$\pm$\,3.1} & 28.0{\scriptsize\,$\pm$\,3.7} & 25.3{\scriptsize\,$\pm$\,1.7} & 61.3{\scriptsize\,$\pm$\,5.6} \\
+Wood & 15 & Constant & 26.9{\scriptsize\,$\pm$\,1.9} & 8.6 & 0.0 & 5.4{\scriptsize\,$\pm$\,0.4} & 0.0 & 25.0 & 25.8 & 24.2 & 64.5 \\
+Wood & 15 & Burst$^{\dagger}$ & 23.7{\scriptsize\,$\pm$\,6.7} & 12.2{\scriptsize\,$\pm$\,1.2} & 5.4{\scriptsize\,$\pm$\,3.7} & 9.0{\scriptsize\,$\pm$\,1.7} & 1.1{\scriptsize\,$\pm$\,1.9} & 22.6{\scriptsize\,$\pm$\,7.4} & 22.6{\scriptsize\,$\pm$\,11.2} & 25.3{\scriptsize\,$\pm$\,0.9} & 50.5{\scriptsize\,$\pm$\,16.6} \\
+\bottomrule
+\end{tabular*}
+\par\vspace{2pt}
+\begin{minipage}{\textwidth}\scriptsize
+$^{\dagger}$Burst run~1 calibrated a higher threshold (4,140 against about 3,450), most likely because a knock fell inside the calibration window. Three of the eight 0s that follow a 1 in the uncoded string then fell below it. Excluding run~1, the uncoded BER under burst noise is 27.4\%.
+\end{minipage}
+\end{table*}

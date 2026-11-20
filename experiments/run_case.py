@@ -4,39 +4,35 @@ Run one test case: a fixed material, distance and noise source, through every co
 From the project folder (close the Arduino Serial Monitor first):
     python3 -m experiments.run_case PORT --material wood --distance 20 --settle 50 --window 50 --live
 
-A case runs these blocks, and saves each string to experiments/results/<case>/<case>.csv:
+A case runs these blocks:
     prbs5      PRBS-5, repeated (uncoded), to characterise the noise
     codes      random 32-bit messages, each sent through every code in a shuffled order
-    reference  PRBS-5 once more, to compare with the start and check for drift
+    reference  PRBS-5 once more, to check for drift
+With --prbs-per-code it is just the codes block, every code sending PRBS-5 as its
+message, with "none" as the uncoded baseline.
 
-With --prbs-per-code the case is just the codes block, and every code sends
-the same PRBS-5 string as its message. The "none" code is then the uncoded
-baseline, so there is no separate PRBS-5 block or reference.
-
-Everything from a case goes in its own folder, experiments/results/<case>/:
+Everything goes in experiments/results/<case>/:
     <case>.csv   one row per string
     <case>.png   the live viewer at the end (with --live)
-    raw/<block>_<index>_<code>.npz   the raw piezo samples of each string (see save_raw) Use --no-raw to skip them, and keep the choice the same for
-every run, as streaming them takes a few ms per bit out of the settle time.
+    <case>.mp4   video of the raw signal (see make_video.py, skip with --no-video)
+    raw/<block>_<index>_<code>.npz   raw piezo samples of each string (see save_raw)
+Use --no-raw to skip the raw samples, and keep the choice the same for every run,
+as streaming them takes a few ms per bit out of the settle time.
 
-When a case finishes, a video of its raw signal is made too, <case>.mp4 in the
-same folder (see experiments/make_video.py). Use --no-video to skip it.
-
-Re-run the same command to carry on after a stop. Finished strings are skipped.
-Use --prbs-only for a quick look at a setting, and --sim to try this with no hardware.
+Re-run the same command to carry on after a stop. Use --prbs-only for a quick
+look at a setting, and --sim to run with no hardware.
 
 Receiver extensions (experiments/extensions.py) decide the bits again from the
-raw samples, and save their results to <case>_<extension>.csv:
-    --extension filter              also run the filtering extension during the case
+raw samples, saving to <case>_<extension>.csv:
+    --extension filter              also run the filter during the case
     --replay --extension filter     only run the extension, on every saved case
     --replay <case>.csv ... --extension filter     only on these cases
-    --extension cnn                 the trained network instead (--extension filter cnn for both)
---replay sends nothing and needs no port, material or distance. With --live, each
-extension gets its own window too, updated as each string finishes.
+    --extension cnn                 the trained network (--extension filter cnn for both)
+--replay sends nothing and needs no port, material or distance.
 
-The filter's pass band is set once for each material, from its run 1, and saved in
-experiments/filter_bands.json. Every run of that material uses it from then on:
-    --set-band <run 1>.csv ...      set the band for each run's material
+The filter's pass band is set once per material, from its run 1, and saved in
+experiments/filter_bands.json:
+    --set-band <run 1>.csv ...
 """
 import argparse
 import csv
@@ -265,20 +261,9 @@ def run_case(link, args, case: str, path: Path, fixed: dict,
              stop: Optional[threading.Event] = None,
              ext_events: Optional[Dict[str, queue.Queue]] = None) -> bool:
     """
-    Send every string in the case that isn't already saved.
-
-    Args:
-        link: an ArduinoLink or SimulatedLink.
-        args: the command-line arguments.
-        case (str): the case name.
-        path (Path): the CSV file to add to.
-        fixed (dict): the columns that are the same for every string in the case.
-        events (queue.Queue, optional): where to send updates for the live viewer.
-        stop (threading.Event, optional): set to stop after the current string.
-        ext_events (dict, optional): a queue for each extension's live window.
-
-    Returns:
-        bool: True if the whole case has now been sent.
+    Send every string in the case that isn't already saved. fixed holds the
+    columns shared by every row; events, stop and ext_events are only used with
+    --live. Returns True if the whole case has now been sent.
     """
     trials = planned(args, case)
     check_header(path)
@@ -468,7 +453,7 @@ def check_header(path: Path) -> None:
     if header != FIELDS:
         raise SystemExit(
             f"{path} was written by an older version of run_case with different "
-            "columns. Move it to archive/ and run the case again."
+            "columns. Move it out of the results folder and run the case again."
         )
 
 

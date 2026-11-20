@@ -7,16 +7,7 @@ import numpy as np
 
 
 def flip_one_bit(bits, position: Optional[int] = None) -> List[int]:
-    """
-    Very basic simulated channel: returns a copy of the bits with one flipped.
-
-    Args:
-        bits (List[int]): bits going into the channel.
-        position (int, optional): index of the bit to flip. Defaults to a random one.
-
-    Returns:
-        List[int]: bits coming out of the channel.
-    """
+    """Very basic simulated channel: flips one bit (a random one by default)."""
     received = list(bits)
 
     if position is None:
@@ -49,13 +40,7 @@ class SimulatedLink:
     OFFSET_SAMPLES = 20
 
     def __init__(self, bit_s: float = 0.0, seed: int = 1, raw: bool = False):
-        """
-        Args:
-            bit_s (float, optional): time to wait per bit. Defaults to 0.0.
-            seed (int, optional): seed for the noise. Defaults to 1.
-            raw (bool, optional): also make up raw samples for each bit, like
-                ArduinoLink(raw=True). Defaults to False.
-        """
+        """bit_s is the time to wait per bit, in seconds."""
         self.bit_s = bit_s
         self.rng = random.Random(seed)
         self.np_rng = np.random.default_rng(seed)

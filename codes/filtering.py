@@ -1,7 +1,7 @@
 """
 Noise filtering before the signal is turned back into bits.
 
-The Arduino currently thresholds the raw peak-to-peak of each bit window, so
+The Arduino thresholds the raw peak-to-peak of each bit window, so
 any noise in any frequency adds to the reading. Here we work on the raw ADC
 samples instead: band-pass around the motor's vibration frequency, take the
 envelope, then measure each bit and threshold it.
@@ -14,9 +14,9 @@ Run from the project folder:
     python3 -m codes.filtering --file rec.npy --bit-ms 100 --lo 70 --hi 105
     python3 -m codes.filtering --no-plot              # just print the bit errors
 
-Needs raw samples (uint16 ADC counts). piezo_receiver_v3 only returns one
-peak-to-peak number per bit, so a raw-capture sketch is needed to test real data
-(see archive/piezo_receiver_v2/capture.py for the format of the .npy files).
+Needs raw samples (uint16 ADC counts). piezo_receiver_v3 streams them when raw
+mode is on, and experiments/run_case.py saves them for every string in
+experiments/results/<case>/raw/*.npz. --file takes a 1-D .npy array of samples.
 """
 import argparse
 from typing import List, Optional, Tuple
@@ -27,7 +27,6 @@ from scipy import signal
 FS = 10_000  # Hz, SAMPLE_RATE in the Arduino sketch
 
 
-# ----------------------------------------------------------------- filtering
 
 def bandpass(x, fs: float, lo: float, hi: float, order: int = 4, kind: str = "butter") -> np.ndarray:
     """
@@ -36,17 +35,7 @@ def bandpass(x, fs: float, lo: float, hi: float, order: int = 4, kind: str = "bu
 
     kind: "butter" (flat pass band, moderate overshoot), "bessel" (gentle
     roll-off but minimal ringing, keeps edges sharp) or "cheby1" (steepest, but
-    ripple and the most ringing).
-
-    Args:
-        x: samples.
-        fs (float): sampling rate in Hz.
-        lo (float): lower cutoff in Hz.
-        hi (float): upper cutoff in Hz.
-        order (int, optional): filter order. Defaults to 4.
-
-    Returns:
-        np.ndarray: filtered samples, same length as x.
+    ripple and the most ringing). fs, lo and hi are in Hz.
     """
     if kind == "bessel":
         sos = signal.bessel(order, [lo, hi], btype="bandpass", fs=fs, output="sos", norm="mag")
@@ -95,23 +84,14 @@ def find_motor_band(x, fs: float, min_hz: float = 20.0, halfwidth: float = 15.0)
     return max(peak - halfwidth, 1.0), peak + halfwidth
 
 
-# ------------------------------------------------------------- demodulation
 
 def bit_levels(env, fs: float, bit_ms: float, n_bits: int, settle_ms: float = 0.0, start: int = 0) -> np.ndarray:
     """
     Mean envelope in each bit's measuring window (skipping settle_ms at the
     start of the bit, while the motor spins up or down).
 
-    Args:
-        env: envelope samples.
-        fs (float): sampling rate in Hz.
-        bit_ms (float): length of one bit in ms (settle + window).
-        n_bits (int): number of bits to read.
-        settle_ms (float, optional): ignored at the start of each bit. Defaults to 0.
-        start (int, optional): sample index where bit 0 starts. Defaults to 0.
-
-    Returns:
-        np.ndarray: one level per bit.
+    bit_ms is the whole bit (settle + window); start is the sample index
+    where bit 0 begins.
     """
     bit_n = int(round(bit_ms * fs / 1000))
     skip = int(round(settle_ms * fs / 1000))
@@ -184,7 +164,6 @@ def raw_peak_to_peak(x, fs: float, bit_ms: float, n_bits: int, settle_ms: float 
     return np.array(out)
 
 
-# ------------------------------------------------------- synthetic test data
 
 def synthetic_recording(
     bits,
@@ -227,7 +206,6 @@ def synthetic_recording(
     return np.clip(32768 + x, 0, 65535)
 
 
-# --------------------------------------------------------------- visualiser
 
 def plot_filtering(x, result: dict, fs: float, bit_ms: float, sent=None, raw_levels=None,
                    lo: float = 0, hi: float = 0, settle_ms: float = 0.0, start: int = 0, save: Optional[str] = None):
@@ -328,8 +306,7 @@ def compare_filters(lo=70.0, hi=105.0, order=4, fs=FS, carrier=87.0, tau_ms=40.0
     ax[0].set_title("Band-pass gain: only the shape near the edges differs")
     ax[0].legend()
 
-    ideal = np.convolve(np.repeat(bits, int(bit_ms * fs / 1000)), [1], "same") * 4000
-    ax[1].plot(t, ideal / 1.0 * 0.0 + np.abs(signal.hilbert(x - x.mean())), color="0.7", lw=1, label="unfiltered envelope")
+    ax[1].plot(t, np.abs(signal.hilbert(x - x.mean())), color="0.7", lw=1, label="unfiltered envelope")
     ax[1].set_xlabel("s")
     ax[1].set_title("Envelope on a clean signal (bits 0 1 1 0 0), grey = no filter")
     ax[1].legend()
@@ -388,7 +365,6 @@ def compare_sharpen(x, sent, fs, bit_ms, lo, hi, settle_ms, tau_ms, smooth_hz=40
     return err
 
 
-# ---------------------------------------------------------------------- CLI
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)

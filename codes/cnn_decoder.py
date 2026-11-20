@@ -34,12 +34,8 @@ RESULTS_GLOB = "experiments/results/**/*.npz"
 CASE_RE = re.compile(r"^(?P<material>[a-z]+)_(?P<dist>\d+)cm_(?P<noise>[a-z-]+?)_S(?P<settle>\d+)_W(?P<window>\d+)")
 DEFAULT_MODEL = "models/cnn_decoder.pt"
 
-# Part 1: Prep data
-# Define data structure
-#   recording file -> envelope (how strong the vibration is) -> one small window per bit.
-#   The label for each bit is the bit that was actually sent.
+# Part 1: data. recording -> envelope -> one window per bit, labelled with the bit sent.
 
-# One recording = raw samples + the bits we sent + what the Arduino decided.
 @dataclass
 class Recording:
     path: str
@@ -54,7 +50,7 @@ class Recording:
     settle_ms: float
 
 
-# Parse metadata: Read material, distance and noise type from the folder name.
+# Material, distance and noise type come from the case folder name.
 def parse_meta(path: str) -> Optional[Dict[str, str]]:
     for part in Path(path).parts:
         m = CASE_RE.match(part)
@@ -66,7 +62,6 @@ def parse_meta(path: str) -> Optional[Dict[str, str]]:
     return None
 
 
-# Open one .npz file and put its contents into a Recording.
 def load_recording(path: str) -> Optional[Recording]:
     meta = parse_meta(path)
     if meta is None:
@@ -81,7 +76,6 @@ def load_recording(path: str) -> Optional[Recording]:
     )
 
 
-# Find every recording under experiments/results.
 def find_recordings(root: str = ".", settle_ms: Optional[float] = 150) -> List[Recording]:
     out = []
     for p in sorted(glob.glob(str(Path(root) / RESULTS_GLOB), recursive=True)):
@@ -91,7 +85,6 @@ def find_recordings(root: str = ".", settle_ms: Optional[float] = 150) -> List[R
     return out
 
 
-# Check a recording against a filter like 'material=wood;noise=none'.
 def matches(rec: Recording, spec: str) -> bool:
     """spec like 'material=wood,acrylic;noise=none': clauses ANDed, values ORed. '' matches all."""
     for clause in filter(None, spec.split(";")):
@@ -101,7 +94,6 @@ def matches(rec: Recording, spec: str) -> bool:
     return True
 
 
-# Raw wiggles -> smooth strength line -> 16 numbers per bit slot (1 = loud, 0 = silent).
 def envelope_steps(rec: Recording) -> np.ndarray:
     """
     (n_bits, STEPS_PER_BIT) envelope of every bit slot, scaled so the string's loud level is 1.
@@ -122,8 +114,7 @@ def envelope_steps(rec: Recording) -> np.ndarray:
     return out / max(float(np.percentile(out, 95)), 1.0)
 
 
-# For each bit, stack its 16 numbers with the 2 bits before and 2 bits after it.
-# Add margin: a 0 after a 1 starts loud (motor still slowing), a 0 after a 0 starts silent.
+# Context matters: a 0 after a 1 starts loud (motor still slowing), a 0 after a 0 starts silent.
 def bit_windows(rec: Recording) -> np.ndarray:
     """One example per bit: (n_bits, 2, (2*CONTEXT+1)*STEPS_PER_BIT) = envelope and a 'bit exists' flag."""
     env = envelope_steps(rec)
@@ -137,14 +128,13 @@ def bit_windows(rec: Recording) -> np.ndarray:
     return X
 
 
-# Label each bit with what came before it: 0->0, 0->1, 1->0 or 1->1.
 def transitions(rec: Recording) -> np.ndarray:
     """Class 0..3 for each bit: 2 * previous bit + this bit (the bit before the first is 0)."""
     prev = np.concatenate([[0], rec.sent[:-1]])
     return (2 * prev + rec.sent).astype(np.int64)
 
 
-# Join all recordings into one big table: inputs, sent bits, transition labels.
+# Inputs, sent bits and transition labels for all recordings stacked together.
 def build_dataset(recs: Sequence[Recording]) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     X = np.concatenate([bit_windows(r) for r in recs])
     y = np.concatenate([r.sent for r in recs]).astype(np.float32)
@@ -152,10 +142,8 @@ def build_dataset(recs: Sequence[Recording]) -> Tuple[np.ndarray, np.ndarray, np
     return X, y, t
 
 
-# Part 2: Define the models.
-#   window of numbers in -> probability that the bit is a 1 (between 0 and 1) out.
+# Part 2: models. window in -> probability that the bit is a 1 out.
 
-# Add a zoomed-in view of small levels, so leftover buzz is not lost next to a loud 1.
 def with_log_channel(x: torch.Tensor) -> torch.Tensor:
     """Add a log-level channel so small leftover levels after a 1 stay visible next to the full level."""
     env, flag = x[:, 0:1], x[:, 1:2]
@@ -163,8 +151,7 @@ def with_log_channel(x: torch.Tensor) -> torch.Tensor:
     # the log finite there and leaves every other value unchanged.
     return torch.cat([env, torch.log((env + 0.02).clamp(min=1e-3)), flag], 1)
 
-# The CNN: filters find shapes in the window, then a small layer decides 1 or 0.
-# It also guesses the transition type, which teaches it spin-up and spin-down.
+# The transition head is an auxiliary task that teaches it spin-up and spin-down.
 class Cnn(nn.Module):
     """Small 1D CNN. Returns (bit logit, transition logits for the 4 classes)."""
 
@@ -184,7 +171,6 @@ class Cnn(nn.Module):
         return self.bit(h).squeeze(-1), self.transition(h)
 
 
-# The simple baseline: add up the window with learned weights and decide. No shapes.
 class Linear(nn.Module):
     """Baseline: logistic regression on the same window. A linear filter plus a decision, nothing more."""
 
@@ -199,8 +185,8 @@ class Linear(nn.Module):
 MODELS = {"linear": Linear, "cnn": Cnn}
 
 
-# Part 3: Train model
-#   repeat: show a batch of windows -> model guesses -> compare with the sent bits -> adjust weights.
+# Part 3: training. gain_jitter randomly scales each window's envelope so the
+# model does not depend on the absolute vibration level.
 def train_model(kind: str, X, y, t, epochs: int, lr: float, batch: int, seed: int,
                 transition_weight: float = 0.5, gain_jitter: float = 0.2) -> nn.Module:
     torch.manual_seed(seed)
@@ -231,8 +217,7 @@ def train_model(kind: str, X, y, t, epochs: int, lr: float, batch: int, seed: in
     return model
 
 
-# Part 4: Run inference
-#   recording in -> probability per bit -> 0 if under 0.5, 1 if 0.5 or over.
+# Part 4: inference
 class CnnDecoder:
     """Trained model wrapper: CnnDecoder.load(path).decode(rec) gives a 0/1 for every bit of a recording."""
 
@@ -260,12 +245,10 @@ class CnnDecoder:
         return [int(p >= 0.5) for p in self.probabilities(rec)]
 
 
-# Part 5: Evaluation
-#   bits from each method -> the code's decoder -> message -> count the wrong bits.
+# Part 5: evaluation. bits from each method -> the code's decoder -> count wrong message bits.
 
-# The other methods to compare against: Arduino, adaptive threshold, band-pass filter.
 def baseline_bits(rec: Recording) -> Dict[str, List[int]]:
-    """The other demodulators on the same recording."""
+    """The other demodulators on the same recording: Arduino, adaptive threshold, band-pass."""
     x, fs = rec.samples.astype(float), rec.fs
     start = int(rec.bit_start[0])
     bit_ms = (rec.bit_start[1] - rec.bit_start[0]) * 1000 / fs
@@ -278,7 +261,6 @@ def baseline_bits(rec: Recording) -> Dict[str, List[int]]:
             "band-pass": filt}
 
 
-# Count errors for every method and code, then print the tables.
 def evaluate(recs: Sequence[Recording], predictors: Dict[str, Callable[[Recording], List[int]]]) -> None:
     """Message-bit error rate per code and demodulator, then channel errors by transition."""
     order = ["none", "R3", "R5", "hamming74", "conv75"]
@@ -306,12 +288,11 @@ def evaluate(recs: Sequence[Recording], predictors: Dict[str, Callable[[Recordin
         for n in predictors:
             cells = "".join(f"{msg[(g, n, c)][0] / msg[(g, n, c)][1]:>10.1%} " if msg[(g, n, c)][1] else f"{'-':>11}" for c in order)
             print(f"  {n:14}{cells}{chan[(g, n)][0] / max(chan[(g, n)][1], 1):>12.1%}")
-        print(f"  channel bit errors by transition (previous->this):  " + "   ".join(["0->0", "0->1", "1->0", "1->1"]))
+        print("  channel bit errors by transition (previous->this):  " + "   ".join(["0->0", "0->1", "1->0", "1->1"]))
         for n in predictors:
             print(f"  {n:14}" + "".join(f"{trans[(g, n, c)][0] / max(trans[(g, n, c)][1], 1):>14.1%}" for c in range(4)))
 
 
-# Put the trained models next to the other methods, then run evaluate.
 def run_eval(recs, models: Dict[str, nn.Module]) -> None:
     predictors = {k: (lambda r, k=k: baseline_bits(r)[k]) for k in ("hardware", "adaptive raw", "band-pass")}
     for kind, m in models.items():
@@ -320,13 +301,11 @@ def run_eval(recs, models: Dict[str, nn.Module]) -> None:
 
 
 # CLI
-#   train = learn and test, eval = test a saved model, predict = decode one file.
 
 def side_path(model_path: str, kind: str) -> str:
     return str(Path(model_path).with_name(f"{Path(model_path).stem}_{kind}.pt"))
 
 
-# train: pick train and test files -> train both models -> save -> print the tables.
 def cmd_train(a):
     recs = find_recordings(a.root, None if a.settle < 0 else a.settle)
     train = [r for r in recs if matches(r, a.train)]
@@ -343,7 +322,6 @@ def cmd_train(a):
     if test:
         run_eval(test, models)
 
-# eval: load saved models -> test them on the chosen files.
 def cmd_eval(a):
     models = {}
     for kind in ("linear", "cnn"):
@@ -356,7 +334,6 @@ def cmd_eval(a):
     print(f"Evaluating on {len(recs)} recordings matching '{a.test or 'all'}'")
     run_eval(recs, models)
 
-# predict: load a model -> decode one recording -> show the result next to the Arduino's.
 def cmd_predict(a):
     rec = load_recording(a.npz)
     if rec is None:

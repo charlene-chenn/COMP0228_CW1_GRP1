@@ -4,13 +4,8 @@ from typing import List
 def conv_encode(bits) -> List[int]:
     """
     Rate-1/2 convolutional encoder (K=3, generators 7 and 5 octal). Appends
-    2 zero tail bits so the register ends in state 0.
-
-    Args:
-        bits (List[int]): message bits, as ints 0 or 1.
-
-    Returns:
-        List[int]: flat encoded bits, of length 2 * (len(bits) + 2).
+    2 zero tail bits so the register ends in state 0. Output length is
+    2 * (len(bits) + 2).
     """
     s1, s2 = 0, 0  # s1 = previous input bit, s2 = the one before that
     encoded = []
@@ -25,18 +20,10 @@ def conv_encode(bits) -> List[int]:
 
 def decode_viterbi(bits) -> List[int]:
     """
-    Decode a binary message with a hard-decision Viterbi decoder, for the
-    rate-1/2 convolutional code in conv_encode. Finds the valid encoder path
-    closest in Hamming distance to the received bits. Assumes the encoder
-    started in state 0 and was flushed back to state 0 by 2 zero tail bits.
-
-    states [00] [01] [10] [11]
-
-    Args:
-        bits (List[int]): received bits, as ints 0 or 1, including the tail.
-
-    Returns:
-        List[int]: decoded message bits, with the tail removed.
+    Hard-decision Viterbi decoder for conv_encode. Finds the encoder path
+    closest in Hamming distance to the received bits (tail included).
+    Assumes the encoder started and ended in state 0. Returns the message
+    bits with the tail removed.
     """
     # A state is the encoder's register as a 2-bit number: (s1 << 1) | s2
     num_steps = len(bits)//2

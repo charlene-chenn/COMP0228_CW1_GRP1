@@ -64,15 +64,9 @@ def map_layout(strings, extensions=()) -> list:
     Work out the error maps to draw: one for each length of PRBS string, and for
     coded strings one map of channel bits and one of decoded message bits.
 
-    Args:
-        strings: (block, index, code, channel bits, message bits) for each string
-            the viewer shows, in the order sent.
-        extensions: receiver extensions to give their own row under each string,
-            with id (block, index, code, extension).
-
-    Returns:
-        list: a dict for each map, with its key, title, x label, width, and the
-        id (block, index, code) and label of each row.
+    strings gives (block, index, code, channel bits, message bits) for each string
+    shown, in the order sent. Each extension gets its own row under each string,
+    with id (block, index, code, extension).
     """
     prbs_maps, coded = {}, []
     for block, index, code, length, message_length in strings:
@@ -178,17 +172,8 @@ class LiveView:
                  raw: bool = False, level_label: str = "Peak-to-peak (ADC counts)",
                  window_title: str = "PRBS live view"):
         """
-        Set up the window.
-
-        Args:
-            events (queue.Queue): updates from the running case.
-            case (str): the case name for the title.
-            layout (list): the error maps, from map_layout.
-            stop (threading.Event, optional): set when the window closes.
-            save_path (Path, optional): where to save a picture when the case ends.
-            raw (bool, optional): show the raw signal panel. Defaults to False.
-            level_label (str, optional): what the vibration strip's values are.
-            window_title (str, optional): the window's title bar.
+        layout comes from map_layout. stop (a threading.Event) is set when the
+        window closes, and save_path is where the picture goes when the case ends.
         """
         self.events = events
         self.case = case
@@ -426,7 +411,6 @@ class LiveView:
         self.run = 0
 
     def _drain(self) -> None:
-        """Apply any waiting updates from the running case."""
         while True:
             try:
                 self._handle(self.events.get_nowait())
@@ -448,7 +432,6 @@ class LiveView:
             self.scope.add_bit(*details)
 
     def update(self, _frame=None) -> None:
-        """Apply any waiting updates and draw everything."""
         self._drain()
         self._draw()
         if self.finished and self.save_path is not None:
@@ -615,16 +598,7 @@ def level_label(first_row: dict) -> str:
 
 
 def view_saved(path: Path, show: bool = True) -> Path:
-    """
-    Draw a saved case (or an extension's results) and save the picture next to it.
-
-    Args:
-        path (Path): the CSV.
-        show (bool, optional): also open the window. Defaults to True.
-
-    Returns:
-        Path: the picture, <csv name>.png.
-    """
+    """Draw a saved case (or an extension's results) and save it as <csv name>.png."""
     path = Path(path)
     with open(path, newline="") as file:
         rows = {i: row for i, row in enumerate(csv.DictReader(file))}

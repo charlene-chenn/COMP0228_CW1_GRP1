@@ -26,13 +26,9 @@ class ArduinoLink:
         """
         Connect to the Arduino and wait for it to finish calibrating.
 
-        Args:
-            port (str): serial port, e.g. /dev/cu.usbmodem1101.
-            baudrate (int, optional): must match the sketch. Defaults to 115200.
-            timeout (float, optional): longest wait for a reply line in seconds.
-                Must be longer than one bit takes. Defaults to 5.0.
-            raw (bool, optional): also record the raw piezo samples for every bit.
-                They are kept in last_raw after each send_and_receive. Defaults to False.
+        timeout is the longest wait for a reply line in seconds, so it must be
+        longer than one bit takes. With raw=True the piezo samples for every bit
+        are kept in last_raw after each send_and_receive.
         """
         self.threshold = None
         self.raw = raw
@@ -55,21 +51,12 @@ class ArduinoLink:
 
     def send_and_receive(self, bits, on_bit=None) -> Tuple[List[int], List[int]]:
         """
-        Transmit bits through the motor and return what the piezo detected.
+        Transmit bits through the motor and return (detected, vibration) per bit.
 
-        With raw recording on, the samples for each bit are left in last_raw, with
-        the motor switch positions in last_offsets and the number of late bits in
-        last_late.
-
-        Args:
-            bits (List[int]): bits to send, as ints 0 or 1.
-            on_bit (Callable, optional): called as on_bit(index, detected, vibration, raw)
-                as each bit's reply arrives, for live viewing. raw is that bit's
-                samples, or None if raw recording is off. Defaults to None.
-
-        Returns:
-            Tuple[List[int], List[int]]: the detected bit and the raw
-            peak-to-peak vibration reading for each bit sent.
+        on_bit(index, detected, vibration, raw) is called as each reply arrives,
+        for live viewing; raw is None unless raw recording is on. With raw on,
+        the samples, motor switch positions and late count are left in last_raw,
+        last_offsets and last_late.
         """
         text = "".join(str(int(b)) for b in bits)
 

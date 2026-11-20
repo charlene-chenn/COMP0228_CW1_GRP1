@@ -38,14 +38,7 @@ FRAME_MS = 33          # Scope window refresh, about 30 frames a second
 
 class RawScope:
     def __init__(self, ax, animated: bool = False):
-        """
-        Set up the raw signal on some axes.
-
-        Args:
-            ax: the matplotlib axes to draw on.
-            animated (bool, optional): True when the caller redraws only this
-                axes with blitting, as the scope window does. Defaults to False.
-        """
+        """animated is True when the caller redraws only this axes with blitting."""
         from matplotlib.lines import Line2D
 
         self.ax = ax
@@ -107,12 +100,7 @@ class RawScope:
         self.new_string = True
 
     def add_bit(self, samples, sent: int, read: int) -> bool:
-        """
-        Add one bit's samples.
-
-        Returns:
-            bool: True if the bit length changed, so the time axis needs resizing.
-        """
+        """Add one bit's samples. Returns True if the bit length changed."""
         if self.ring is None:
             size = int(KEEP_S * (self.sample_rate or 10000))
             self.ring = np.full(size, np.nan, dtype=np.float32)
